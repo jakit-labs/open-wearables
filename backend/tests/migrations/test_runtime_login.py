@@ -159,6 +159,18 @@ def _served(env: dict[str, str], log: Path) -> Generator[str, None, None]:
         app.wait(timeout=60)
 
 
+class TestMigrateStep:
+    def test_migrates_and_seeds_as_a_non_superuser_owner(
+        self, admin_url: str, migrate_step: subprocess.CompletedProcess[str]
+    ) -> None:
+        assert migrate_step.returncode == 0, migrate_step.stderr[-2000:]
+        with psycopg.connect(_conninfo(admin_url, OWNER, PASSWORD, MIGRATED_DB)) as conn:
+            assert conn.execute("SELECT version_num FROM alembic_version").fetchall() == [(HEAD,)]
+            assert conn.execute("SELECT count(*) > 0 FROM provider_settings").fetchall() == [(True,)]
+            assert conn.execute("SELECT count(*) > 0 FROM series_type_definition").fetchall() == [(True,)]
+            assert conn.execute("SELECT count(*) FROM developer").fetchall() == [(1,)]
+
+
 class TestBootGate:
     def test_refuses_an_unmigrated_database_instead_of_migrating(self, admin_url: str) -> None:
         env = {**_script_env(admin_url, RUNTIME_LOGIN, EMPTY_DB), "API_PORT": str(_free_port())}
