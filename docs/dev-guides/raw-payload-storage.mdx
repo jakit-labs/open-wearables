@@ -26,7 +26,7 @@ The feature is **disabled by default** and adds zero overhead when turned off.
 Add these environment variables to your `.env` file:
 
 ```bash
-# Storage backend: "disabled" (default), "log", or "s3"
+# Storage backend: "disabled" (default) or "s3"
 RAW_PAYLOAD_STORAGE=disabled
 
 # Maximum payload size in bytes (default: 10 MB)
@@ -53,27 +53,7 @@ No payloads are stored. The `store_raw_payload()` call returns immediately with 
 RAW_PAYLOAD_STORAGE=disabled
 ```
 
-### Log
-
-Writes each payload as a structured JSON line to stdout. Useful for development, or when your infrastructure already captures application logs (e.g., CloudWatch, Datadog).
-
-```bash
-RAW_PAYLOAD_STORAGE=log
-```
-
-Example output:
-
-```json
-{
-  "level": "debug",
-  "message": "raw_payload",
-  "source": "webhook",
-  "provider": "garmin",
-  "size_bytes": 4521,
-  "trace_id": "a1b2c3d4",
-  "payload": "{...}"
-}
-```
+This fork has no stdout backend: a payload in the logs would bypass the log allowlist, so the settings refuse `RAW_PAYLOAD_STORAGE=log` at startup.
 
 ### S3
 
@@ -164,17 +144,6 @@ This covers archival only. Under `SDK_PAYLOAD_S3_OFFLOAD` the upload is the payl
 ## Example Setup
 
 <Tabs>
-  <Tab title="Development (Log)">
-    ```bash
-    RAW_PAYLOAD_STORAGE=log
-    ```
-
-    Then inspect payloads in Docker logs:
-
-    ```bash
-    docker compose logs -f backend | grep raw_payload
-    ```
-  </Tab>
   <Tab title="Development (MinIO)">
     [MinIO](https://min.io/) is an S3-compatible object store you can run locally. This lets you browse stored payloads via a web UI without needing an AWS account.
 

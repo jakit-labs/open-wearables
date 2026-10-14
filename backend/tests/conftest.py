@@ -50,7 +50,7 @@ def _postgres_url() -> Generator[str, None, None]:
         return
 
     with PostgresContainer(
-        image="postgres:18",
+        image="postgres:16",  # the engine BH.Loop runs the sidecar on
         username="open-wearables",
         password="open-wearables",
         dbname="open_wearables_test",

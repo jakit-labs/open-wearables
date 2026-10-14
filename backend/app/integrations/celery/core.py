@@ -1,7 +1,6 @@
 import logging
 import ssl
-import sys
-from logging import Formatter, LogRecord, StreamHandler, getLogger
+from logging import LogRecord, getLogger
 from typing import cast
 
 from celery import Celery, signals
@@ -28,34 +27,14 @@ class _WebhookTraceFilter(logging.Filter):
 
 
 @signals.setup_logging.connect
-def setup_celery_logging(**kwargs) -> None:
+def setup_celery_logging(loglevel: int | str = logging.WARNING, **kwargs) -> None:
+    """Keep Celery on the root handler and its allowlist formatter (T-CYK-1009 AC-5).
+
+    A connected receiver stops Celery from installing its own handlers and from
+    redirecting stdout into a logger, so every worker and beat record leaves
+    through the one sink app.main configured, at the level the command names.
     """
-    Configure Celery logging to use stdout instead of stderr.
-
-    Some platforms convert stderr logs to level.error automatically, so we must use stdout
-    to ensure platforms correctly identify log levels from JSON structured logs.
-
-    This signal is called when Celery sets up its logging configuration.
-    """
-    # Get Celery's logger
-    celery_logger = getLogger("celery")
-
-    # Remove existing handlers that might use stderr
-    celery_logger.handlers.clear()
-
-    # Create a handler that uses stdout
-    stdout_handler = StreamHandler(sys.stdout)
-    stdout_handler.setFormatter(
-        Formatter(
-            "[%(asctime)s - %(name)s] (%(levelname)s) %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
-        )
-    )
-
-    # Add stdout handler to Celery logger
-    celery_logger.addHandler(stdout_handler)
-    celery_logger.setLevel(logging.INFO)
-    celery_logger.propagate = False
+    getLogger().setLevel(loglevel)
 
     # celery.app.trace logs "Task ... succeeded in Xs: {result}" at INFO for
     # every task execution.  Suppress those lines only for the high-frequency

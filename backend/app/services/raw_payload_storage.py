@@ -5,7 +5,6 @@ Disabled by default - enable via RAW_PAYLOAD_STORAGE env var.
 
 Supported backends:
     - "disabled" (default): no-op
-    - "log": prints JSON to stdout
     - "s3": uploads to S3 bucket (configured via RAW_PAYLOAD_S3_BUCKET / AWS creds)
 
 Usage (one-liner at ingestion point):
@@ -14,7 +13,6 @@ Usage (one-liner at ingestion point):
 
 import json
 import logging
-import sys
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
@@ -102,9 +100,7 @@ def store_raw_payload(
         )
         return
 
-    if _storage_backend == "log":
-        _store_to_log(source, provider, payload_str, size, user_id, trace_id)
-    elif _storage_backend == "s3":
+    if _storage_backend == "s3":
         put_payload_to_s3(source=source, provider=provider, payload=payload_str, user_id=user_id, trace_id=trace_id)
 
 
@@ -149,30 +145,6 @@ def _split_ref(ref: str) -> tuple[str, str]:
     if not bucket or not key:
         raise ValueError(f"Malformed S3 payload reference: {ref}")
     return bucket, key
-
-
-def _store_to_log(
-    source: str,
-    provider: str,
-    payload_str: str,
-    size: int,
-    user_id: str | None,
-    trace_id: str | None,
-) -> None:
-    entry: dict[str, Any] = {
-        "level": "debug",
-        "message": "raw_payload",
-        "source": source,
-        "provider": provider,
-        "size_bytes": size,
-    }
-    if user_id:
-        entry["user_id"] = user_id
-    if trace_id:
-        entry["trace_id"] = trace_id
-    entry["payload"] = payload_str
-
-    print(json.dumps(entry), file=sys.stdout, flush=True)
 
 
 def put_payload_to_s3(

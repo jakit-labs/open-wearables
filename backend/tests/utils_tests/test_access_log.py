@@ -86,23 +86,27 @@ class TestAccessLogMiddleware:
         levels = [call.args[1] for call in mock.call_args_list]
         assert levels == ["info", "error"]
 
-    def test_query_string_is_preserved_in_path(self) -> None:
-        client = _build_client(AccessLogLevel.ALL)
-        with patch("app.middlewares.log_structured") as mock:
-            client.get("/ok?limit=5&sort_by=created_at")
-        assert mock.call_args_list[0].kwargs["path"] == "/ok?limit=5&sort_by=created_at"
+    def test_route_template_replaces_the_raw_path(self) -> None:
+        # T-CYK-1009 AC-5: the raw path and query carry ids and secrets; only the
+        # matched route's template is logged.
+        app = FastAPI()
 
-    @pytest.mark.parametrize(
-        "key",
-        ["token", "verification_token", "hub.verify_token"],
-    )
-    def test_secret_query_values_are_redacted(self, key: str) -> None:
-        # These authenticate unsigned provider webhooks, so a logged value is a
-        # usable credential — Withings' grants a forced disconnect.
+        @app.get("/users/{user_id}")
+        async def user(user_id: str) -> dict[str, str]:
+            return {"user_id": user_id}
+
+        with patch.object(settings, "access_log_level", AccessLogLevel.ALL):
+            add_access_log_middleware(app)
+        client = TestClient(app)
+        with patch("app.middlewares.log_structured") as mock:
+            client.get("/users/s3cret-id?token=s3cret&appli=1")
+            client.get("/no-such-route/s3cret-id")
+        assert [call.kwargs["route"] for call in mock.call_args_list] == ["/users/{user_id}", None]
+        assert "s3cret" not in repr(mock.call_args_list)
+
+    def test_a_500_logs_the_error_type_only(self) -> None:
         client = _build_client(AccessLogLevel.ALL)
         with patch("app.middlewares.log_structured") as mock:
-            client.get(f"/ok?{key}=s3cret&appli=1")
-        path = mock.call_args_list[0].kwargs["path"]
-        assert "s3cret" not in path
-        assert f"{key}=REDACTED" in path
-        assert "appli=1" in path
+            client.get("/boom")
+        assert mock.call_args_list[0].kwargs["error_type"] == "RuntimeError"
+        assert "kaboom" not in repr(mock.call_args_list)

@@ -23,11 +23,6 @@ class TestConfigure:
         raw_payload_storage.configure("disabled", 1024)
         assert raw_payload_storage._storage_backend == "disabled"
 
-    def test_configure_log(self) -> None:
-        raw_payload_storage.configure("log", 2048)
-        assert raw_payload_storage._storage_backend == "log"
-        assert raw_payload_storage._max_size_bytes == 2048
-
     def test_configure_s3_without_bucket_falls_back_to_disabled(self) -> None:
         raw_payload_storage.configure("s3", 1024, s3_bucket=None)
         assert raw_payload_storage._storage_backend == "disabled"
@@ -65,28 +60,12 @@ class TestStoreRawPayload:
         # Should not raise
         raw_payload_storage.store_raw_payload(source="webhook", provider="garmin", payload={"key": "val"})
 
-    def test_payload_exceeding_max_size_is_skipped(self, capsys: pytest.CaptureFixture[str]) -> None:
-        raw_payload_storage.configure("log", 10)  # 10 bytes max
+    def test_payload_exceeding_max_size_is_skipped(self) -> None:
+        mock_client = MagicMock()
+        with patch.object(raw_payload_storage, "_create_s3_client", return_value=mock_client):
+            raw_payload_storage.configure("s3", 10, s3_bucket="test-bucket")  # 10 bytes max
         raw_payload_storage.store_raw_payload(source="webhook", provider="garmin", payload={"big": "payload"})
-        captured = capsys.readouterr()
-        assert "raw_payload" not in captured.out
-
-    def test_log_backend_outputs_json(self, capsys: pytest.CaptureFixture[str]) -> None:
-        raw_payload_storage.configure("log", 10 * 1024 * 1024)
-        raw_payload_storage.store_raw_payload(
-            source="webhook",
-            provider="garmin",
-            payload={"test": True},
-            user_id="user-123",
-            trace_id="trace-abc",
-        )
-        captured = capsys.readouterr()
-        entry = json.loads(captured.out.strip())
-        assert entry["message"] == "raw_payload"
-        assert entry["source"] == "webhook"
-        assert entry["provider"] == "garmin"
-        assert entry["user_id"] == "user-123"
-        assert entry["trace_id"] == "trace-abc"
+        mock_client.put_object.assert_not_called()
 
     def test_s3_backend_uploads_payload(self) -> None:
         mock_client = MagicMock()

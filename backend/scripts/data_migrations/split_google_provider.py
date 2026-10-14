@@ -16,12 +16,12 @@ upload holds no OAuth material at all, and a run records the transport that prod
 Settings and priorities were only ever a cloud concern, so they move to ``google_health``.
 ``health_score`` follows its data source.
 
-Runs before ``init_provider_settings.py`` in ``scripts/start/app.sh``: that seeds a
+Run it before ``init_provider_settings.py`` (``scripts/start/migrate.sh``): that seeds a
 ``google_health`` row, and ``provider_settings.provider`` is a primary key, so the rename
 would collide with it.
 
 Idempotent: every statement is keyed on ``provider = 'google'``, so re-runs are no-ops once
-no legacy rows remain. Safe to run on every startup until removed.
+no legacy rows remain.
 
 Usage (inside Docker):
     docker compose exec app uv run python scripts/data_migrations/split_google_provider.py --dry-run

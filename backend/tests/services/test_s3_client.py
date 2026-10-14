@@ -1,6 +1,5 @@
 """Tests for the shared boto3 S3 client factory."""
 
-import json
 from unittest.mock import patch
 
 import pytest
@@ -63,23 +62,24 @@ class TestCreateS3Client:
         _, kwargs = mock_client.call_args
         assert kwargs["endpoint_url"] == "http://other-storage:9000"
 
-    def test_returns_none_on_no_credentials_error(self, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_returns_none_on_no_credentials_error(self, caplog: pytest.LogCaptureFixture) -> None:
         with patch("boto3.client", side_effect=NoCredentialsError()):
             assert create_s3_client() is None
 
-        log_entry = json.loads(capsys.readouterr().out)
-        assert log_entry["level"] == "warning"
-        assert log_entry["message"] == "Cannot create S3 client"
-        assert log_entry["error_type"] == "NoCredentialsError"
+        _assert_warned(caplog, "NoCredentialsError")
 
-    def test_returns_none_on_invalid_endpoint(self, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_returns_none_on_invalid_endpoint(self, caplog: pytest.LogCaptureFixture) -> None:
         with patch("boto3.client", side_effect=ValueError("Invalid endpoint: not-a-url")):
             assert create_s3_client("not-a-url") is None
 
-        log_entry = json.loads(capsys.readouterr().out)
-        assert log_entry["level"] == "warning"
-        assert log_entry["message"] == "Cannot create S3 client"
-        assert log_entry["error_type"] == "ValueError"
+        _assert_warned(caplog, "ValueError")
+
+
+def _assert_warned(caplog: pytest.LogCaptureFixture, error_type: str) -> None:
+    [record] = [record for record in caplog.records if record.name == "app.services.s3_client"]
+    assert record.levelname == "WARNING"
+    assert record.getMessage() == "Cannot create S3 client"
+    assert getattr(record, "structured")["error_type"] == error_type
 
 
 class TestCreateS3ClientWithoutCredentials:
