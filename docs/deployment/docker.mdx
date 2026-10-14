@@ -16,7 +16,8 @@ The single backend image covers every backend role. The start command selects wh
 
 | Command | Role |
 |---------|------|
-| `scripts/start/app.sh` | API server. Also applies database migrations and seed scripts on startup |
+| `scripts/start/migrate.sh` | Applies database migrations and seed scripts, then exits. Run it before the API on every release |
+| `scripts/start/app.sh` | API server. Refuses to start (exit `78`) unless the database is at the latest migration |
 | `scripts/start/worker.sh` | Celery worker (data syncs, background jobs) |
 | `scripts/start/beat.sh` | Celery beat (scheduler) |
 | `scripts/start/flower.sh` | Flower (Celery monitoring UI, port `5555`) |
@@ -88,6 +89,18 @@ services:
       - redis_data:/data
     restart: unless-stopped
 
+  migrate:
+    image: themomentum/open-wearables-backend:latest
+    command: scripts/start/migrate.sh
+    env_file:
+      - ./.env
+    environment:
+      - DB_HOST=db
+      - REDIS_HOST=redis
+    depends_on:
+      db:
+        condition: service_healthy
+
   app:
     image: themomentum/open-wearables-backend:latest
     command: scripts/start/app.sh
@@ -99,8 +112,8 @@ services:
     ports:
       - "8000:8000"
     depends_on:
-      db:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_started
     restart: unless-stopped
@@ -173,7 +186,7 @@ The defaults in `.env.example` are development values. Override at least these f
     ```bash
     docker compose up -d
     ```
-    The `app` container applies database migrations and seed scripts before the API starts.
+    The `migrate` container applies database migrations and seed scripts, then exits. The `app` container starts once it has succeeded.
   </Step>
   <Step title="Check service status">
     ```bash
@@ -185,7 +198,7 @@ The defaults in `.env.example` are development values. Override at least these f
     ```bash
     curl -fsS http://localhost:8000/openapi.json > /dev/null && echo OK
     ```
-    Prints `OK` once the API is up (migrations can take a moment on first start). Then open `http://localhost:3000` in a browser—the login page should load.
+    Prints `OK` once the API is up (the `migrate` step can take a moment on first start). Then open `http://localhost:3000` in a browser—the login page should load.
   </Step>
 </Steps>
 
