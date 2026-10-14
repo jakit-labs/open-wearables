@@ -29,6 +29,7 @@ from app.models import User
 from app.services.providers.factory import ProviderFactory
 
 SENTINEL = "173.917"  # a synthetic heart-rate-like value; never real data
+STORED_SENTINEL = "173.92"  # the same value as a numeric(5,2) column keeps it
 
 
 @pytest.fixture
@@ -69,7 +70,7 @@ def server_error_client(db: Session) -> Generator[TestClient, None, None]:
 
 
 def _assert_no_sentinel(output: str) -> None:
-    leaks = [line for line in output.splitlines() if SENTINEL in line]
+    leaks = [line for line in output.splitlines() if SENTINEL in line or STORED_SENTINEL in line]
     assert leaks == [], f"{len(leaks)} log line(s) carry the sentinel: {leaks[:3]}"
 
 
