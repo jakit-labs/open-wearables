@@ -98,6 +98,8 @@ def configure_logging(level: int | str = logging.INFO) -> None:
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(AllowlistFormatter())
     logging.basicConfig(level=level, handlers=[handler], force=True)
+    # a warning's text can hold a request value; send it through the same allowlist
+    logging.captureWarnings(True)
 
 
 def log_structured(

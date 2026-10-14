@@ -23,13 +23,6 @@ from app.utils.structured_logging import configure_logging
 # (T-CYK-1009 AC-5).
 configure_logging()
 
-# Remove uvicorn's default handlers to prevent duplicate logs (uvicorn.error)
-# and route startup/error lines through the root logger for timestamps.
-for _name in ("uvicorn", "uvicorn.error"):
-    _logger = logging.getLogger(_name)
-    _logger.handlers.clear()
-    _logger.propagate = True
-
 # httpx/httpcore log one INFO line per outgoing request; at our request volume that is
 # pure noise (event-type sync, provider calls, webhook delivery). Keep warnings and errors.
 for _name in ("httpx", "httpcore"):
@@ -38,10 +31,15 @@ for _name in ("httpx", "httpcore"):
 
 @asynccontextmanager
 async def _lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
-    # Silence uvicorn.access here, not at import: uvicorn's configure_logging() runs a
-    # dictConfig that re-creates the logger and undoes an import-time disable. Lifespan
-    # runs after it, so add_access_log_middleware stays the single access-log source.
+    # Configure uvicorn's loggers here, not at import: uvicorn's configure_logging() runs a
+    # dictConfig that re-creates them and undoes import-time changes. Lifespan runs after it,
+    # so add_access_log_middleware stays the single access-log source, and uvicorn's own
+    # handler, which prints an unhandled request's exception text, gives way to the root
+    # allowlist (T-CYK-1009 AC-5).
     logging.getLogger("uvicorn.access").disabled = True
+    for name in ("uvicorn", "uvicorn.error"):
+        logging.getLogger(name).handlers.clear()
+        logging.getLogger(name).propagate = True
     svix_service.register_event_types()
     yield
 

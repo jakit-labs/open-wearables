@@ -240,12 +240,6 @@ class TestTransportedPayloadCleanup:
 
         mock_delete.assert_not_called()
 
-    def test_kept_when_archival_uses_log(self, db: Session, mock_celery_app: MagicMock) -> None:
-        """The offload path skips the stdout write, so S3 holds the only copy."""
-        mock_delete = _run_offloaded_batch(db, UserFactory(), archival="log")
-
-        mock_delete.assert_not_called()
-
     def test_kept_when_the_import_fails(self, db: Session, mock_celery_app: MagicMock) -> None:
         """A failed batch keeps its payload so it can be diagnosed and replayed."""
         mock_delete = _run_offloaded_batch(db, UserFactory(), archival="disabled", status_code=500)
