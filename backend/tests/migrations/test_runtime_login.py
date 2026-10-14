@@ -1,4 +1,4 @@
-"""The migrate step, the boot gate and the runtime login (BH.Loop fork, T-CYK-1009 AC-4, C1).
+"""Migrate step, boot gate, runtime login and served-API logs (BH.Loop fork, T-CYK-1009 AC-4, AC-5, C1).
 
 Production splits the database logins. The owner runs ``scripts/start/migrate.sh``
 as its own step; the API, worker and beat log in as a member of
@@ -8,19 +8,22 @@ These tests build that split on the test server: a non-superuser owner of its ow
 database (a superuser would pass every grant check and hide a missing one), a
 NOLOGIN runtime role and a login in it, and a NOLOGIN ``cloudsqlsuperuser``
 stand-in that is granted nothing. CONNECT is revoked from PUBLIC, as BH.Loop does
-for the sidecar database.
+for the sidecar database. ``TestServedApiLogs`` runs the real ``fastapi run``
+process, whose uvicorn logging config the in-process TestClient never loads.
 """
 
+import json
 import os
-import selectors
 import signal
 import socket
 import subprocess
 import time
 from collections.abc import Generator
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import LiteralString
 
+import httpx
 import psycopg
 import pytest
 from alembic.config import Config
@@ -32,17 +35,24 @@ OWNER = "bh_loop_wearables"
 RUNTIME = "bh_loop_wearables_runtime"
 RUNTIME_LOGIN = "zz_wearables_runtime_login"
 PASSWORD = "synthetic-test-password"
+ADMIN_PASSWORD = "synthetic-admin-password"
 MIGRATED_DB = "zz_wearables_migrated"
 EMPTY_DB = "zz_wearables_empty"
+BEHIND_DB = "zz_wearables_behind"
+DATABASES = (MIGRATED_DB, EMPTY_DB, BEHIND_DB)
+# synthetic probe values the served API must never print
+PROBE_USER_ID = "17391700-0000-4000-8000-000000173917"
+PROBE_HOOK = Path(__file__).resolve().parent / "served_probe"
 
 
-def _alembic_head() -> str | None:
+def _scripts() -> ScriptDirectory:
     config = Config(str(BACKEND / "alembic.ini"))
     config.set_main_option("script_location", str(BACKEND / "migrations"))
-    return ScriptDirectory.from_config(config).get_current_head()
+    return ScriptDirectory.from_config(config)
 
 
-HEAD = _alembic_head()
+HEAD = _scripts().get_current_head()
+BEHIND = _scripts().get_revision(HEAD).down_revision if HEAD else None
 
 
 def _conninfo(admin_url: str, user: str, password: str, dbname: str) -> str:
@@ -59,12 +69,13 @@ def _script_env(admin_url: str, user: str, dbname: str) -> dict[str, str]:
         "DB_NAME": dbname,
         "DB_USER": user,
         "DB_PASSWORD": PASSWORD,
+        "ADMIN_PASSWORD": ADMIN_PASSWORD,
         "ENVIRONMENT": "production",
     }
 
 
-def _run(script: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["bash", script], cwd=BACKEND, env=env, capture_output=True, text=True, timeout=600)
+def _run(command: list[str], env: dict[str, str], timeout: int = 600) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(command, cwd=BACKEND, env=env, capture_output=True, text=True, timeout=timeout)
 
 
 @pytest.fixture(scope="module")
@@ -74,7 +85,7 @@ def admin_url(_postgres_url: str) -> Generator[str, None, None]:
     admin = _conninfo(_postgres_url, str(url.username), str(url.password), str(url.database))
     attributes = "NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE"
     with psycopg.connect(admin, autocommit=True) as conn:
-        for dbname in (MIGRATED_DB, EMPTY_DB):
+        for dbname in DATABASES:
             conn.execute(f"DROP DATABASE IF EXISTS {dbname} WITH (FORCE)")
         for role in (RUNTIME_LOGIN, RUNTIME, OWNER, "cloudsqlsuperuser"):
             conn.execute(f"DROP ROLE IF EXISTS {role}")
@@ -82,12 +93,12 @@ def admin_url(_postgres_url: str) -> Generator[str, None, None]:
         conn.execute(f"CREATE ROLE {RUNTIME} NOLOGIN {attributes}")
         conn.execute(f"CREATE ROLE {RUNTIME_LOGIN} LOGIN PASSWORD '{PASSWORD}' {attributes} IN ROLE {RUNTIME}")
         conn.execute("CREATE ROLE cloudsqlsuperuser NOLOGIN")
-        for dbname in (MIGRATED_DB, EMPTY_DB):
+        for dbname in DATABASES:
             conn.execute(f"CREATE DATABASE {dbname} OWNER {OWNER}")
             conn.execute(f"REVOKE CONNECT ON DATABASE {dbname} FROM PUBLIC")
     yield _postgres_url
     with psycopg.connect(admin, autocommit=True) as conn:
-        for dbname in (MIGRATED_DB, EMPTY_DB):
+        for dbname in DATABASES:
             conn.execute(f"DROP DATABASE IF EXISTS {dbname} WITH (FORCE)")
         for role in (RUNTIME_LOGIN, RUNTIME, OWNER, "cloudsqlsuperuser"):
             conn.execute(f"DROP ROLE IF EXISTS {role}")
@@ -96,7 +107,7 @@ def admin_url(_postgres_url: str) -> Generator[str, None, None]:
 @pytest.fixture(scope="module")
 def migrate_step(admin_url: str) -> subprocess.CompletedProcess[str]:
     """``migrate.sh`` run once, as the owner, on its own database."""
-    return _run("scripts/start/migrate.sh", _script_env(admin_url, OWNER, MIGRATED_DB))
+    return _run(["bash", "scripts/start/migrate.sh"], _script_env(admin_url, OWNER, MIGRATED_DB))
 
 
 @pytest.fixture
@@ -114,23 +125,45 @@ def _free_port() -> int:
         return sock.getsockname()[1]
 
 
-class TestMigrateStep:
-    def test_migrates_and_seeds_as_a_non_superuser_owner(
-        self, admin_url: str, migrate_step: subprocess.CompletedProcess[str]
-    ) -> None:
-        assert migrate_step.returncode == 0, migrate_step.stderr[-2000:]
-        with psycopg.connect(_conninfo(admin_url, OWNER, PASSWORD, MIGRATED_DB)) as conn:
-            assert conn.execute("SELECT version_num FROM alembic_version").fetchall() == [(HEAD,)]
-            assert conn.execute("SELECT count(*) > 0 FROM provider_settings").fetchall() == [(True,)]
-            assert conn.execute("SELECT count(*) > 0 FROM series_type_definition").fetchall() == [(True,)]
-            assert conn.execute("SELECT count(*) FROM developer").fetchall() == [(1,)]
+def _version(admin_url: str, dbname: str) -> list[tuple[str]]:
+    with psycopg.connect(_conninfo(admin_url, OWNER, PASSWORD, dbname)) as conn:
+        return conn.execute("SELECT version_num FROM alembic_version").fetchall()
+
+
+@contextmanager
+def _served(env: dict[str, str], log: Path) -> Generator[str, None, None]:
+    """``app.sh`` serving on a free port, its stdout and stderr in ``log``; yields its base URL."""
+    port = _free_port()
+    with log.open("w") as out:
+        app = subprocess.Popen(
+            ["bash", "scripts/start/app.sh"],
+            cwd=BACKEND,
+            env={**env, "API_PORT": str(port)},
+            stdout=out,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    base = f"http://127.0.0.1:{port}"
+    try:
+        deadline = time.monotonic() + 300
+        while app.poll() is None and time.monotonic() < deadline:
+            with suppress(httpx.TransportError):
+                if httpx.get(f"{base}/").status_code == 200:
+                    break
+            time.sleep(0.5)
+        else:
+            raise AssertionError(f"app.sh did not serve: {log.read_text()[-2000:]}")
+        yield base
+    finally:
+        os.killpg(app.pid, signal.SIGTERM)
+        app.wait(timeout=60)
 
 
 class TestBootGate:
     def test_refuses_an_unmigrated_database_instead_of_migrating(self, admin_url: str) -> None:
         env = {**_script_env(admin_url, RUNTIME_LOGIN, EMPTY_DB), "API_PORT": str(_free_port())}
 
-        result = _run("scripts/start/app.sh", env)
+        result = _run(["bash", "scripts/start/app.sh"], env, timeout=120)
 
         assert result.returncode == 78
         assert "WEARABLES_SCHEMA_BEHIND" in result.stderr
@@ -138,35 +171,81 @@ class TestBootGate:
             tables = conn.execute("SELECT count(*) FROM pg_tables WHERE schemaname = 'public'").fetchall()
         assert tables == [(0,)]
 
-    def test_serves_a_database_at_head(self, admin_url: str, runtime: psycopg.Connection) -> None:
-        env = {**_script_env(admin_url, RUNTIME_LOGIN, MIGRATED_DB), "API_PORT": str(_free_port())}
-        app = subprocess.Popen(
-            ["bash", "scripts/start/app.sh"],
-            cwd=BACKEND,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            start_new_session=True,
-        )
-        output: list[str] = []
-        try:
-            assert app.stdout is not None
-            selector = selectors.DefaultSelector()
-            selector.register(app.stdout, selectors.EVENT_READ)
-            deadline = time.monotonic() + 300
-            while time.monotonic() < deadline and app.poll() is None:
-                if selector.select(timeout=1):
-                    line = app.stdout.readline()
-                    output.append(line)
-                    if "Starting the FastAPI application" in line:
-                        break
-        finally:
-            os.killpg(app.pid, signal.SIGTERM)
-            app.wait(timeout=60)
+    def test_refuses_a_database_one_revision_behind(self, admin_url: str) -> None:
+        # as the owner, who could migrate: the gate refuses for the schema, not for a missing grant
+        env = _script_env(admin_url, OWNER, BEHIND_DB)
+        behind = _run(["uv", "run", "alembic", "upgrade", str(BEHIND)], env)
+        assert behind.returncode == 0, behind.stderr[-2000:]
 
-        assert any("Starting the FastAPI application" in line for line in output), "".join(output)[-2000:]
-        assert not any("WEARABLES_SCHEMA_BEHIND" in line for line in output)
+        result = _run(["bash", "scripts/start/app.sh"], {**env, "API_PORT": str(_free_port())}, timeout=120)
+
+        assert result.returncode == 78
+        assert "WEARABLES_SCHEMA_BEHIND" in result.stderr
+        assert _version(admin_url, BEHIND_DB) == [(BEHIND,)]
+
+    def test_serves_a_database_at_head(self, admin_url: str, runtime: psycopg.Connection, tmp_path: Path) -> None:
+        env = _script_env(admin_url, RUNTIME_LOGIN, MIGRATED_DB)
+
+        with _served(env, tmp_path / "app.log") as base:
+            assert httpx.get(f"{base}/").status_code == 200
+
+        assert "WEARABLES_SCHEMA_BEHIND" not in (tmp_path / "app.log").read_text()
+
+
+@pytest.fixture(scope="module")
+def served_output(
+    admin_url: str, migrate_step: subprocess.CompletedProcess[str], tmp_path_factory: pytest.TempPathFactory
+) -> list[str]:
+    """Every line the served API printed after one unhandled 500 and the ``served_probe`` hook's emits."""
+    assert migrate_step.returncode == 0, migrate_step.stderr[-2000:]
+    folder = tmp_path_factory.mktemp("served")
+    trigger = folder / "emit"
+    env = {
+        **_script_env(admin_url, RUNTIME_LOGIN, MIGRATED_DB),
+        "PYTHONPATH": str(PROBE_HOOK),
+        "SERVED_PROBE_TRIGGER": str(trigger),
+    }
+    with _served(env, folder / "app.log") as base:
+        login = httpx.post(
+            f"{base}/api/v1/auth/login", data={"username": "admin@admin.com", "password": ADMIN_PASSWORD}
+        )
+        assert login.status_code == 200
+        bearer = {"Authorization": f"Bearer {login.json()['access_token']}"}
+        # no such user: the refresh-token insert breaks its foreign key, an unhandled 500
+        token = httpx.post(f"{base}/api/v1/users/{PROBE_USER_ID}/token", headers=bearer, json={})
+        assert token.status_code == 500
+        trigger.touch()
+        deadline = time.monotonic() + 60
+        while not (folder / "emit.done").exists() and time.monotonic() < deadline:
+            time.sleep(0.2)
+        assert (folder / "emit.done").exists(), "the served_probe hook did not run"
+    return (folder / "app.log").read_text().splitlines()
+
+
+def _records(lines: list[str]) -> list[dict[str, object]]:
+    return [json.loads(line) for line in lines if line.startswith("{")]
+
+
+class TestServedApiLogs:
+    """The real ``fastapi run`` process: uvicorn's own logging config, not the in-process TestClient."""
+
+    def test_an_unhandled_500_prints_no_request_value(self, served_output: list[str]) -> None:
+        leaks = [line for line in served_output if PROBE_USER_ID in line]
+        assert leaks == [], f"{len(leaks)} line(s) carry the request's user id: {leaks[:3]}"
+        assert any(record.get("error_type") == "IntegrityError" for record in _records(served_output))
+
+    def test_uvicorns_exception_report_prints_no_reading(self, served_output: list[str]) -> None:
+        leaks = [line for line in served_output if "173.917" in line]
+        assert leaks == [], f"{len(leaks)} line(s) carry the reading: {leaks[:3]}"
+        assert any(
+            record.get("logger") == "uvicorn.error" and record.get("error_type") == "ValueError"
+            for record in _records(served_output)
+        )
+
+    def test_a_python_warning_prints_no_reading(self, served_output: list[str]) -> None:
+        leaks = [line for line in served_output if "164.281" in line]
+        assert leaks == [], f"{len(leaks)} line(s) carry the reading: {leaks[:3]}"
+        assert any(record.get("logger") == "py.warnings" for record in _records(served_output))
 
 
 class TestRuntimeLogin:

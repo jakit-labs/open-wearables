@@ -19,13 +19,16 @@ import pytest
 from celery import signals
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.config import Settings
 from app.database import DbSession, _get_db_dependency, async_engine, engine
 from app.integrations.celery.tasks.process_sdk_upload_task import process_sdk_upload
 from app.main import api, celery_app
 from app.models import User
+from app.services import raw_payload_storage
 from app.services.providers.factory import ProviderFactory
 
 SENTINEL = "173.917"  # a synthetic heart-rate-like value; never real data
@@ -197,3 +200,22 @@ def test_statement_errors_hide_their_parameters() -> None:
     # A statement error's text then never carries a bound value into any sink.
     assert engine.hide_parameters is True
     assert async_engine.sync_engine.hide_parameters is True
+
+
+class TestRawPayloadStorageHasNoStdoutMode:
+    """The upstream ``log`` mode printed whole provider payloads to stdout, past the allowlist."""
+
+    def test_settings_refuse_it(self) -> None:
+        with pytest.raises(ValidationError):
+            Settings(raw_payload_storage="log")
+
+    def test_a_payload_reaches_no_output(self, log_output: Callable[[], str]) -> None:
+        raw_payload_storage.configure("log", 10 * 1024 * 1024)
+        try:
+            raw_payload_storage.store_raw_payload(
+                source="sdk", provider="apple", payload={"averageHeartRate": float(SENTINEL)}
+            )
+        finally:
+            raw_payload_storage.configure("disabled", 10 * 1024 * 1024)
+
+        _assert_no_sentinel(log_output())
