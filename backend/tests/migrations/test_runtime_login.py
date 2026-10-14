@@ -74,8 +74,8 @@ def _script_env(admin_url: str, user: str, dbname: str) -> dict[str, str]:
     }
 
 
-def _run(command: list[str], env: dict[str, str], timeout: int = 600) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(command, cwd=BACKEND, env=env, capture_output=True, text=True, timeout=timeout)
+def _run(command: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(command, cwd=BACKEND, env=env, capture_output=True, text=True, timeout=600)
 
 
 @pytest.fixture(scope="module")
@@ -171,28 +171,48 @@ class TestMigrateStep:
             assert conn.execute("SELECT count(*) FROM developer").fetchall() == [(1,)]
 
 
+def _boot(env: dict[str, str], log: Path, wait: float = 60) -> int | None:
+    """``app.sh`` given ``wait`` seconds to exit, its output in ``log``; its exit code, or None if it kept serving."""
+    with log.open("w") as out:
+        app = subprocess.Popen(
+            ["bash", "scripts/start/app.sh"],
+            cwd=BACKEND,
+            env={**env, "API_PORT": str(_free_port())},
+            stdout=out,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    try:
+        return app.wait(timeout=wait)
+    except subprocess.TimeoutExpired:
+        return None
+    finally:
+        with suppress(ProcessLookupError):
+            os.killpg(app.pid, signal.SIGTERM)
+        app.wait(timeout=60)
+
+
 class TestBootGate:
-    def test_refuses_an_unmigrated_database_instead_of_migrating(self, admin_url: str) -> None:
-        env = {**_script_env(admin_url, RUNTIME_LOGIN, EMPTY_DB), "API_PORT": str(_free_port())}
+    """Each boot runs as the owner, a login that could migrate: the gate must refuse for the schema."""
 
-        result = _run(["bash", "scripts/start/app.sh"], env, timeout=120)
+    def test_refuses_an_unmigrated_database_instead_of_migrating(self, admin_url: str, tmp_path: Path) -> None:
+        returncode = _boot(_script_env(admin_url, OWNER, EMPTY_DB), tmp_path / "app.log")
 
-        assert result.returncode == 78
-        assert "WEARABLES_SCHEMA_BEHIND" in result.stderr
+        assert returncode == 78, (tmp_path / "app.log").read_text()[-2000:]
+        assert "WEARABLES_SCHEMA_BEHIND" in (tmp_path / "app.log").read_text()
         with psycopg.connect(_conninfo(admin_url, OWNER, PASSWORD, EMPTY_DB)) as conn:
             tables = conn.execute("SELECT count(*) FROM pg_tables WHERE schemaname = 'public'").fetchall()
         assert tables == [(0,)]
 
-    def test_refuses_a_database_one_revision_behind(self, admin_url: str) -> None:
-        # as the owner, who could migrate: the gate refuses for the schema, not for a missing grant
+    def test_refuses_a_database_one_revision_behind(self, admin_url: str, tmp_path: Path) -> None:
         env = _script_env(admin_url, OWNER, BEHIND_DB)
         behind = _run(["uv", "run", "alembic", "upgrade", str(BEHIND)], env)
         assert behind.returncode == 0, behind.stderr[-2000:]
 
-        result = _run(["bash", "scripts/start/app.sh"], {**env, "API_PORT": str(_free_port())}, timeout=120)
+        returncode = _boot(env, tmp_path / "app.log")
 
-        assert result.returncode == 78
-        assert "WEARABLES_SCHEMA_BEHIND" in result.stderr
+        assert returncode == 78, (tmp_path / "app.log").read_text()[-2000:]
+        assert "WEARABLES_SCHEMA_BEHIND" in (tmp_path / "app.log").read_text()
         assert _version(admin_url, BEHIND_DB) == [(BEHIND,)]
 
     def test_serves_a_database_at_head(self, admin_url: str, runtime: psycopg.Connection, tmp_path: Path) -> None:
@@ -283,7 +303,7 @@ class TestRuntimeLogin:
             for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE")
         }
         expected |= {("alembic_version", "r", "SELECT")}
-        expected |= {(sequence, "S", privilege) for sequence in sequences for privilege in ("USAGE", "SELECT")}
+        expected |= {(sequence, "S", "USAGE") for sequence in sequences}
         assert len(tables) > 1
         assert granted == expected
 

@@ -16,7 +16,6 @@ from uuid import uuid4
 
 import httpx
 import pytest
-from celery import signals
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
@@ -36,7 +35,7 @@ STORED_SENTINEL = "173.92"  # the same value as a numeric(5,2) column keeps it
 
 
 @pytest.fixture
-def log_output(capsys: pytest.CaptureFixture[str]) -> Generator[Callable[[], str], None, None]:
+def log_output(capfd: pytest.CaptureFixture[str]) -> Generator[Callable[[], str], None, None]:
     """Everything the process writes to stdout/stderr through its sinks, as one string."""
     buffer = io.StringIO()
     loggers = [logging.getLogger()] + [
@@ -50,7 +49,7 @@ def log_output(capsys: pytest.CaptureFixture[str]) -> Generator[Callable[[], str
                 swapped.append((handler, handler.setStream(buffer)))
 
     def read() -> str:
-        captured = capsys.readouterr()
+        captured = capfd.readouterr()
         return buffer.getvalue() + captured.out + captured.err
 
     yield read
@@ -145,21 +144,29 @@ class TestNoRequestValueReachesTheLogs:
 
     def test_celery_task_failure(self, log_output: Callable[[], str]) -> None:
         root, celery_logger = logging.getLogger(), logging.getLogger("celery")
-        saved = (root.level, celery_logger.level, list(celery_logger.handlers), celery_logger.propagate)
+        saved = (
+            root.level,
+            list(root.handlers),
+            celery_logger.level,
+            list(celery_logger.handlers),
+            celery_logger.propagate,
+        )
 
         @celery_app.task(name="tests.zz_log_probe_failing_task")
         def failing_task(value: str) -> None:
             raise ValueError(f"cannot store {value}")
 
         try:
-            # what a worker or beat process does at start
-            signals.setup_logging.send(sender=None, loglevel=logging.WARNING, logfile=None, format="", colorize=False)
+            # what `celery worker` and `celery beat` run at start
+            celery_app.log.setup_logging_subsystem(loglevel=logging.WARNING)
             result = failing_task.apply(args=[SENTINEL])
         finally:
             root.setLevel(saved[0])
-            celery_logger.setLevel(saved[1])
-            celery_logger.handlers[:] = saved[2]
-            celery_logger.propagate = saved[3]
+            root.handlers[:] = saved[1]
+            celery_logger.setLevel(saved[2])
+            celery_logger.handlers[:] = saved[3]
+            celery_logger.propagate = saved[4]
+            celery_app.log.already_setup = False
 
         assert result.state == "FAILURE"
         _assert_no_sentinel(log_output())
