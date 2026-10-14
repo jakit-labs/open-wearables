@@ -210,7 +210,7 @@ class TestRuntimeLogin:
         [
             "TRUNCATE user_connection",
             "ALTER TABLE user_connection NO FORCE ROW LEVEL SECURITY",
-            "DROP POLICY IF EXISTS any_policy ON user_connection",
+            "CREATE POLICY any_policy ON user_connection USING (true)",
             "DELETE FROM alembic_version",
             "UPDATE alembic_version SET version_num = version_num",
         ],

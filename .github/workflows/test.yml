@@ -15,7 +15,8 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:18
+        # BH.Loop runs the sidecar database on Cloud SQL Postgres 16.
+        image: postgres:16
         env:
           POSTGRES_USER: open-wearables
           POSTGRES_PASSWORD: open-wearables
@@ -38,17 +39,15 @@ jobs:
       SECRET_KEY: test-secret-key-for-ci
       MASTER_KEY: dGVzdC1tYXN0ZXIta2V5LWZvci10ZXN0aW5nLW9ubHk=
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.14"
       - name: Install uv
-        run: curl -LsSf https://astral.sh/uv/install.sh | sh
-      - name: Add uv to PATH
-        run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+        run: curl -LsSf https://astral.sh/uv/0.12.21/install.sh | sh
       - name: Install dependencies
         working-directory: backend
         run: uv sync --group dev

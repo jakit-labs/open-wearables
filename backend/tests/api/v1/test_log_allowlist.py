@@ -96,6 +96,23 @@ class TestNoRequestValueReachesTheLogs:
         assert response.status_code == 500
         _assert_no_sentinel(log_output())
 
+    def test_sdk_log_request_naming_its_own_provider(
+        self, client: TestClient, user: User, api_key_header: dict[str, str], log_output: Callable[[], str]
+    ) -> None:
+        # ``provider`` is an allowed key, and here its value is request text
+        response = client.post(
+            f"/api/v1/sdk/users/{user.id}/logs",
+            json={
+                "sdkVersion": "1.0.0",
+                "provider": f"watch-{SENTINEL}",
+                "events": [{"eventType": "device_state", "timestamp": "2025-04-10T12:00:00Z", "batteryLevel": 0.5}],
+            },
+            headers=api_key_header,
+        )
+
+        assert response.status_code == 202
+        _assert_no_sentinel(log_output())
+
     def test_oauth_callback_code_and_state(self, client: TestClient, log_output: Callable[[], str]) -> None:
         response = client.get(
             "/api/v1/oauth/oura/callback",

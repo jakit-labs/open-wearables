@@ -16,11 +16,29 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql
       - ./backend/scripts/init/create-svix-db.sql:/docker-entrypoint-initdb.d/create-svix-db.sql:ro
+      - ./backend/scripts/init/create-runtime-role.sql:/docker-entrypoint-initdb.d/create-runtime-role.sql:ro
 
-  app:
+  # Migrations and seeds run once, as their own step, before the API (app.sh
+  # refuses a schema that is not at head).
+  migrate:
     build:
         context: ./backend
         dockerfile: Dockerfile
+    image: open-wearables-platform:latest
+    pull_policy: never
+    command: scripts/start/migrate.sh
+    env_file:
+      - ./backend/config/.env
+    environment:
+      - DB_HOST=db
+      - REDIS_HOST=redis
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  app:
     container_name: backend__open-wearables
     image: open-wearables-platform:latest
     pull_policy: never
@@ -33,8 +51,8 @@ services:
     ports:
       - "${API_PORT:-8000}:8000"
     depends_on:
-      db:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_started
     develop:

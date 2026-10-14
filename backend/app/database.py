@@ -28,15 +28,18 @@ from app.schemas.model_crud.user_management import InvitationStatus
 from app.schemas.sync_status import SyncScope, SyncSource, SyncStatus
 from app.utils.mappings_meta import AutoRelMeta
 
+# hide_parameters: a statement error never carries the bound values into its
+# message, so no log or traceback of it can (T-CYK-1009 AC-5).
 engine = create_engine(
     settings.db_uri,
+    hide_parameters=True,
     pool_pre_ping=True,
     pool_size=20,
     max_overflow=30,
     pool_timeout=30,
     pool_recycle=3600,
 )
-async_engine = create_async_engine(settings.db_uri)
+async_engine = create_async_engine(settings.db_uri, hide_parameters=True)
 
 
 def _prepare_sessionmaker(engine: Engine) -> sessionmaker:
