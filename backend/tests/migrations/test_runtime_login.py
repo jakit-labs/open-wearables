@@ -155,7 +155,8 @@ def _served(env: dict[str, str], log: Path) -> Generator[str, None, None]:
             raise AssertionError(f"app.sh did not serve: {log.read_text()[-2000:]}")
         yield base
     finally:
-        os.killpg(app.pid, signal.SIGTERM)
+        with suppress(ProcessLookupError):
+            os.killpg(app.pid, signal.SIGTERM)
         app.wait(timeout=60)
 
 
