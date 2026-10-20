@@ -22,6 +22,10 @@ FROM python:3.14-slim AS builder
     # Copy source and install the project itself (fast, deps already cached)
     COPY . .
     RUN uv sync --locked --no-dev --no-editable
+    # T-CYK-1009 CSO N7: the image runs the app only; tests and their hooks stay
+    # out. Removed here, not in .dockerignore: a BuildKit git context (how
+    # BH.Loop builds this image) does not apply .dockerignore.
+    RUN rm -rf tests
 
 FROM python:3.14-slim
 
