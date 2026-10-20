@@ -6,7 +6,8 @@ FROM python:3.14-slim AS builder
     rm -rf /var/lib/apt/lists/*
     RUN pip install --no-cache-dir --upgrade pyopenssl
 
-    COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+    # T-CYK-1009 CSO N5: uv by version and digest, the same uv the fork CI runs.
+    COPY --from=ghcr.io/astral-sh/uv:0.12.21@sha256:a7aed3216253ee804de3e2d8afa5073baa1a177335345d43845cd4165e43b711 /uv /uvx /bin/
 
     WORKDIR /root_project
 
@@ -31,7 +32,7 @@ FROM python:3.14-slim
 
     WORKDIR /root_project
 
-    COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+    COPY --from=ghcr.io/astral-sh/uv:0.12.21@sha256:a7aed3216253ee804de3e2d8afa5073baa1a177335345d43845cd4165e43b711 /uv /uvx /bin/
 
     COPY --from=builder /opt/venv /opt/venv
     COPY --from=builder /root_project /root_project

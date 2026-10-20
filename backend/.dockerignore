@@ -15,3 +15,6 @@ celerybeat-schedule-wal
 *.log
 *.tmp
 *.bak
+
+# T-CYK-1009 CSO N7: the image runs the app only; tests and their hooks stay out.
+tests/
