@@ -10,6 +10,7 @@ from urllib.parse import quote
 if TYPE_CHECKING:
     from app.schemas.enums import ProviderName
 
+from cryptography.fernet import Fernet
 from pydantic import AnyHttpUrl, Field, SecretStr, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -21,6 +22,10 @@ from app.utils.config_utils import (
     FernetDecryptorField,
     parse_duration,
 )
+
+
+class TokenEncryptionKeyMissingError(RuntimeError):
+    """No ``TOKEN_ENCRYPTION_KEY``: a provider token can be neither stored nor read (T-CYK-1009 AC-3)."""
 
 
 class Settings(BaseSettings):
@@ -68,6 +73,10 @@ class Settings(BaseSettings):
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 60
     token_lifetime: int = 3600
+
+    # T-CYK-1009 AC-3: the Fernet key that encrypts provider OAuth tokens at rest
+    # (user_connection.access_token and refresh_token). Unset, no token is stored or read.
+    token_encryption_key: SecretStr | None = None
 
     # VALIDATION SETTINGS
     min_password_length: int = 8
@@ -437,6 +446,11 @@ class Settings(BaseSettings):
         if isinstance(v, EncryptedField):
             return v.get_decrypted_value(validation_info.data["fernet_decryptor"])
         return v
+
+    def token_fernet(self) -> Fernet:
+        if self.token_encryption_key is None:
+            raise TokenEncryptionKeyMissingError("TOKEN_ENCRYPTION_KEY is not set")
+        return Fernet(self.token_encryption_key.get_secret_value())
 
     @property
     def db_uri(self) -> str:
