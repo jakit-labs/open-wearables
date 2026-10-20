@@ -215,6 +215,18 @@ class TestBootGate:
         assert "WEARABLES_SCHEMA_BEHIND" in (tmp_path / "app.log").read_text()
         assert _version(admin_url, BEHIND_DB) == [(BEHIND,)]
 
+    def test_a_settings_error_is_not_read_as_a_schema_behind(
+        self, admin_url: str, runtime: psycopg.Connection, tmp_path: Path
+    ) -> None:
+        env = {**_script_env(admin_url, RUNTIME_LOGIN, MIGRATED_DB), "RAW_PAYLOAD_STORAGE": "log"}
+
+        returncode = _boot(env, tmp_path / "app.log")
+
+        log = (tmp_path / "app.log").read_text()
+        assert returncode == 78, log[-2000:]
+        assert "WEARABLES_SCHEMA_CHECK_FAILED" in log
+        assert "WEARABLES_SCHEMA_BEHIND" not in log
+
     def test_serves_a_database_at_head(self, admin_url: str, runtime: psycopg.Connection, tmp_path: Path) -> None:
         env = _script_env(admin_url, RUNTIME_LOGIN, MIGRATED_DB)
 
