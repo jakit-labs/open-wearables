@@ -101,7 +101,9 @@ class TestEveryRequestLeavesARow:
             assert row["route"] == "/api/v1/users"
             assert (row["tenant_id"], row["actor_ref"]) == (UUID(TENANT), UUID(ACTOR))
 
-    def test_a_service_call_names_the_service(self, client: TestClient, api_key: ApiKey, user: User, rows: Rows) -> None:
+    def test_a_service_call_names_the_service(
+        self, client: TestClient, api_key: ApiKey, user: User, rows: Rows
+    ) -> None:
         headers = key_and(api_key, context(**{"x-bh-loop-role": "system_job"}))
 
         assert client.get(f"/api/v1/users/{user.id}", headers=headers).status_code == 200

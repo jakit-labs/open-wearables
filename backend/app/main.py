@@ -9,6 +9,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from app.access_audit import AccessAuditMiddleware
 from app.api import head_router
 from app.config import settings
 from app.integrations.celery import create_celery
@@ -59,6 +60,8 @@ raw_payload_storage.configure(
 
 add_cors_middleware(api)
 add_access_log_middleware(api)
+# Last added is outermost: every request, refused or not, leaves an audit row (T-CYK-1009 AC-1).
+api.add_middleware(AccessAuditMiddleware)
 
 # Mount static files for provider icons
 static_dir = Path(__file__).parent / "static"

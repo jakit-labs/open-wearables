@@ -392,9 +392,7 @@ def served_audit(
         assert httpx.get(f"{base}/api/v1/no-such-route").status_code == 404
         refused = httpx.get(f"{base}/api/v1/users", headers={**CONTEXT, "x-bh-loop-role": "superuser"})
         assert refused.status_code == 403
-        created = httpx.post(
-            f"{base}/api/v1/users", headers={**CONTEXT, "X-Open-Wearables-API-Key": key}, json={}
-        )
+        created = httpx.post(f"{base}/api/v1/users", headers={**CONTEXT, "X-Open-Wearables-API-Key": key}, json={})
         assert created.status_code == 201
     with psycopg.connect(_conninfo(admin_url, OWNER, PASSWORD, MIGRATED_DB)) as owner:
         found = owner.execute(
