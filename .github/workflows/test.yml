@@ -46,8 +46,13 @@ jobs:
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.14"
+      # T-CYK-1009 CSO N3: a pinned action and a pinned uv tarball hash, no curl | sh.
       - name: Install uv
-        run: curl -LsSf https://astral.sh/uv/0.12.21/install.sh | sh
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.12.21"
+          checksum: 23f02075b652bb1df64178cfae41b5caf160822e720e2663568f3f5d63bc52c0
+          enable-cache: false
       - name: Install dependencies
         working-directory: backend
         run: uv sync --group dev

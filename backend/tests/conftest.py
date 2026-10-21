@@ -16,7 +16,9 @@ from urllib.parse import urlparse
 
 import pytest
 import redis as redis_lib
+from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import Session, sessionmaker
 from testcontainers.postgres import PostgresContainer
@@ -34,6 +36,8 @@ from tests import factories
 os.environ["ENV"] = "test"
 os.environ["SECRET_KEY"] = "test-secret-key-for-testing-only"
 os.environ["MASTER_KEY"] = "dGVzdC1tYXN0ZXIta2V5LWZvci10ZXN0aW5nLW9ubHk="  # base64 test key
+# T-CYK-1009 AC-3: a fresh synthetic token key for each run; no key is committed.
+settings.token_encryption_key = SecretStr(Fernet.generate_key().decode())
 
 
 @pytest.fixture(scope="session")

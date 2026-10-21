@@ -18,6 +18,9 @@ class DeveloperRead(BaseModel):
 
 
 class DeveloperCreate(BaseModel):
+    # T-CYK-1009 CSO F4: a refused password is never echoed into a printed error.
+    model_config = ConfigDict(hide_input_in_errors=True)
+
     first_name: str | None = Field(None, max_length=100)
     last_name: str | None = Field(None, max_length=100)
     email: EmailStr

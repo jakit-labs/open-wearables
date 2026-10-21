@@ -1,12 +1,27 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import Index
-from sqlalchemy.orm import Mapped
+from sqlalchemy import Dialect, Index, Text
+from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.types import TypeDecorator
 
+from app.config import settings
 from app.database import BaseDbModel
 from app.mappings import FKUser, PrimaryKey, str_64
 from app.schemas.auth import ConnectionStatus
+
+
+class EncryptedText(TypeDecorator[str]):
+    """A provider token: Fernet ciphertext in the table, plaintext in the model (T-CYK-1009 AC-3)."""
+
+    impl = Text
+    cache_ok = True
+
+    def process_bind_param(self, value: str | None, dialect: Dialect) -> str | None:
+        return None if value is None else settings.token_fernet().encrypt(value.encode()).decode()
+
+    def process_result_value(self, value: str | None, dialect: Dialect) -> str | None:
+        return None if value is None else settings.token_fernet().decrypt(value.encode()).decode()
 
 
 class UserConnection(BaseDbModel):
@@ -38,8 +53,8 @@ class UserConnection(BaseDbModel):
     provider_username: Mapped[str | None]
 
     # OAuth tokens (optional for SDK-based providers like Apple)
-    access_token: Mapped[str | None]
-    refresh_token: Mapped[str | None]
+    access_token: Mapped[str | None] = mapped_column(EncryptedText)
+    refresh_token: Mapped[str | None] = mapped_column(EncryptedText)
     token_expires_at: Mapped[datetime | None]
     scope: Mapped[str | None]
 
