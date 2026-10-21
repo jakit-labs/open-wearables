@@ -24,8 +24,9 @@ class GoogleOAuth(BaseOAuthTemplate):
 
     Google requires ``access_type=offline`` to return a refresh token, and
     ``prompt=consent`` to guarantee one is returned on every consent (Google
-    only issues a refresh token on the first consent otherwise). Client
-    credentials are sent in the token request body.
+    only issues a refresh token on the first consent otherwise). ``select_account``
+    beside it makes Google ask which account first. Client credentials are sent
+    in the token request body.
     """
 
     use_pkce: bool = False
@@ -55,9 +56,10 @@ class GoogleOAuth(BaseOAuthTemplate):
         """Build Google's authorization URL.
 
         Adds the Google-specific parameters the base template doesn't emit:
-        ``access_type=offline`` (return a refresh token), ``prompt=consent``
-        (always return one), and ``include_granted_scopes=true`` (incremental
-        authorization).
+        ``access_type=offline`` (return a refresh token), ``prompt=select_account
+        consent`` (always ask which Google account, since the browser may be
+        signed in to someone else's, then always return a refresh token), and
+        ``include_granted_scopes=true`` (incremental authorization).
         """
         params = {
             "response_type": "code",
@@ -67,7 +69,7 @@ class GoogleOAuth(BaseOAuthTemplate):
             "scope": self.credentials.default_scope,
             "access_type": "offline",
             "include_granted_scopes": "true",
-            "prompt": "consent",
+            "prompt": "select_account consent",
         }
         return f"{self.endpoints.authorize_url}?{urlencode(params)}", None
 
