@@ -1,3 +1,4 @@
+from .access_audit import AccessAudit
 from .api_key import ApiKey
 from .application import Application
 from .archival_setting import ArchivalSetting
@@ -32,6 +33,7 @@ DETAIL_MODELS: dict[DetailType, type[EventRecordDetail]] = {
 }
 
 __all__ = [
+    "AccessAudit",
     "ApiKey",
     "Application",
     "ArchivalSetting",
