@@ -312,10 +312,10 @@ class TestRuntimeLogin:
         expected = {
             (table, "r", privilege)
             for table in tables
-            if table != "alembic_version"
+            if table not in ("alembic_version", "access_audit")
             for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE")
         }
-        expected |= {("alembic_version", "r", "SELECT")}
+        expected |= {("alembic_version", "r", "SELECT"), ("access_audit", "r", "INSERT")}
         expected |= {(sequence, "S", "USAGE") for sequence in sequences}
         assert len(tables) > 1
         assert granted == expected
@@ -337,6 +337,10 @@ class TestRuntimeLogin:
             "CREATE POLICY any_policy ON user_connection USING (true)",
             "DELETE FROM alembic_version",
             "UPDATE alembic_version SET version_num = version_num",
+            "SELECT count(*) FROM access_audit",
+            "UPDATE access_audit SET status = 200",
+            "DELETE FROM access_audit",
+            "TRUNCATE access_audit",
         ],
     )
     def test_is_refused_everything_else(self, runtime: psycopg.Connection, statement: LiteralString) -> None:
@@ -354,3 +358,83 @@ class TestRuntimeLogin:
             (OWNER,),
         ).fetchone()
         assert row == (False, False, False, False)
+
+
+TENANT = "9d1f6a43-1c55-4e4a-9a0e-2d5a3c7b1e01"
+ACTOR = "5b0c2e7a-8f3d-4b61-a2c9-7e4d1f0a3b02"
+CONTEXT = {
+    "x-bh-loop-tenant": TENANT,
+    "x-bh-loop-actor": ACTOR,
+    "x-bh-loop-role": "staff",
+    "x-bh-loop-purpose": "wellness_operation",
+}
+
+
+@pytest.fixture(scope="module")
+def served_audit(
+    admin_url: str, migrate_step: subprocess.CompletedProcess[str], tmp_path_factory: pytest.TempPathFactory
+) -> dict[tuple[str, str | None, int | None], list[tuple[object, ...]]]:
+    """The access_audit rows the served API, logged in as the runtime login, wrote for five requests.
+
+    Keyed by (method, route, status); read back as the owner, because the runtime may not read them.
+    """
+    assert migrate_step.returncode == 0, migrate_step.stderr[-2000:]
+    with psycopg.connect(_conninfo(admin_url, OWNER, PASSWORD, MIGRATED_DB), autocommit=True) as owner:
+        owner.execute("DELETE FROM access_audit")
+    folder = tmp_path_factory.mktemp("served-audit")
+    with _served(_script_env(admin_url, RUNTIME_LOGIN, MIGRATED_DB), folder / "app.log") as base:
+        login = httpx.post(
+            f"{base}/api/v1/auth/login", data={"username": "admin@admin.com", "password": ADMIN_PASSWORD}
+        )
+        bearer = {"Authorization": f"Bearer {login.json()['access_token']}"}
+        key = httpx.post(f"{base}/api/v1/developer/api-keys", headers=bearer, json={"name": "audit"}).json()["key"]
+        assert httpx.get(f"{base}/api/v1/users", headers={"X-Open-Wearables-API-Key": "sk-bad"}).status_code == 401
+        assert httpx.get(f"{base}/api/v1/no-such-route").status_code == 404
+        refused = httpx.get(f"{base}/api/v1/users", headers={**CONTEXT, "x-bh-loop-role": "superuser"})
+        assert refused.status_code == 403
+        created = httpx.post(
+            f"{base}/api/v1/users", headers={**CONTEXT, "X-Open-Wearables-API-Key": key}, json={}
+        )
+        assert created.status_code == 201
+    with psycopg.connect(_conninfo(admin_url, OWNER, PASSWORD, MIGRATED_DB)) as owner:
+        found = owner.execute(
+            """
+            SELECT method, route, status, outcome, actor_kind, actor_ref::text, effective_role,
+                   tenant_id::text, purpose, policy_version, request_id::text, created_at
+            FROM access_audit ORDER BY created_at
+            """
+        ).fetchall()
+    keyed: dict[tuple[str, str | None, int | None], list[tuple[object, ...]]] = {}
+    for row in found:
+        keyed.setdefault((row[0], row[1], row[2]), []).append(row[3:])
+    return keyed
+
+
+class TestServedAccessAudit:
+    """AC-1 on the served API as the runtime login: every attempt leaves a row, denials included."""
+
+    def test_a_bad_api_key_leaves_a_denied_row_with_no_tenant(self, served_audit: dict) -> None:
+        [row] = served_audit[("GET", "/api/v1/users", 401)]
+        assert row[:2] == ("denied", "anonymous")
+        assert row[2:6] == (None, None, None, None)
+
+    def test_an_unmatched_path_leaves_a_denied_row(self, served_audit: dict) -> None:
+        [row] = served_audit[("GET", None, 404)]
+        assert row[0] == "denied"
+
+    def test_an_invalid_context_header_leaves_a_denied_row_without_the_value(self, served_audit: dict) -> None:
+        [row] = served_audit[("GET", "/api/v1/users", 403)]
+        assert row[:2] == ("denied", "anonymous")
+        assert row[2:6] == (None, None, None, None)
+        assert "superuser" not in repr(row)
+
+    def test_an_allowed_mutation_leaves_its_attempt_and_its_outcome(self, served_audit: dict) -> None:
+        [attempt] = served_audit[("POST", "/api/v1/users", None)]
+        [outcome] = served_audit[("POST", "/api/v1/users", 201)]
+        assert attempt[0] == "attempt"
+        assert outcome[0] == "allowed"
+        for row in (attempt, outcome):
+            assert row[1:6] == ("staff", ACTOR, "staff", TENANT, "wellness_operation")
+            assert row[6]  # the policy version
+            assert row[8] is not None  # the time
+        assert attempt[7] == outcome[7]  # one request

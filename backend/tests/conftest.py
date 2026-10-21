@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from testcontainers.postgres import PostgresContainer
 from testcontainers.redis import RedisContainer
 
+from app import access_audit
 from app.config import settings
 from app.database import BaseDbModel, _get_db_dependency
 from app.integrations.redis_client import get_redis_client
@@ -93,6 +94,13 @@ def engine(_postgres_url: str) -> Any:
 
     yield test_engine
     BaseDbModel.metadata.drop_all(bind=test_engine)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _access_audit_engine(engine: Any) -> Generator[None, None, None]:
+    """The access audit writes on a connection of its own: point it at the test database (T-CYK-1009 AC-1)."""
+    with patch.object(access_audit, "engine", engine):
+        yield
 
 
 @pytest.fixture(scope="session")
