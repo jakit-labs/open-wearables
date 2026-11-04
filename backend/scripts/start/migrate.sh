@@ -10,6 +10,8 @@ uv run python scripts/init_provider_settings.py
 uv run python scripts/init_device_priorities.py
 # Uses ADMIN_EMAIL/ADMIN_PASSWORD, so this step reads the same environment as the API.
 uv run python scripts/init/seed_admin.py
+# T-CYK-1009 S20: stores the hash of SEED_API_KEY, the key BH.Loop's API sends.
+uv run python scripts/init/seed_api_key.py
 uv run python scripts/init/seed_series_types.py
 uv run python scripts/init/seed_archival_settings.py
 uv run python scripts/init/seed_webhook_event_types.py
