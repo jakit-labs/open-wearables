@@ -1,4 +1,4 @@
-"""Migrate step, boot gate, runtime login and served-API logs (BH.Loop fork, T-CYK-1009 AC-4, AC-5, C1).
+"""Migrate step, boot gate, runtime login and served-API logs (BH.Loop fork, T-CYK-1009 AC-4, AC-5, C1, S20).
 
 Production splits the database logins. The owner runs ``scripts/start/migrate.sh``
 as its own step; the API, worker and beat log in as a member of
@@ -12,6 +12,7 @@ for the sidecar database. ``TestServedApiLogs`` runs the real ``fastapi run``
 process, whose uvicorn logging config the in-process TestClient never loads.
 """
 
+import hashlib
 import json
 import os
 import signal
@@ -36,6 +37,8 @@ RUNTIME = "bh_loop_wearables_runtime"
 RUNTIME_LOGIN = "zz_wearables_runtime_login"
 PASSWORD = "synthetic-test-password"
 ADMIN_PASSWORD = "synthetic-admin-password"
+# S20: the key only the migrate step reads, as Cloud Run hands it over from Secret Manager
+SEED_API_KEY = "sk-5eed0000000000000000000000c0ffee"
 MIGRATED_DB = "zz_wearables_migrated"
 EMPTY_DB = "zz_wearables_empty"
 BEHIND_DB = "zz_wearables_behind"
@@ -106,8 +109,9 @@ def admin_url(_postgres_url: str) -> Generator[str, None, None]:
 
 @pytest.fixture(scope="module")
 def migrate_step(admin_url: str) -> subprocess.CompletedProcess[str]:
-    """``migrate.sh`` run once, as the owner, on its own database."""
-    return _run(["bash", "scripts/start/migrate.sh"], _script_env(admin_url, OWNER, MIGRATED_DB))
+    """``migrate.sh`` run once, as the owner, on its own database, with the key to seed."""
+    env = {**_script_env(admin_url, OWNER, MIGRATED_DB), "SEED_API_KEY": SEED_API_KEY}
+    return _run(["bash", "scripts/start/migrate.sh"], env)
 
 
 @pytest.fixture
@@ -170,6 +174,18 @@ class TestMigrateStep:
             assert conn.execute("SELECT count(*) > 0 FROM provider_settings").fetchall() == [(True,)]
             assert conn.execute("SELECT count(*) > 0 FROM series_type_definition").fetchall() == [(True,)]
             assert conn.execute("SELECT count(*) FROM developer").fetchall() == [(1,)]
+
+    def test_seeds_the_api_key_and_prints_no_value(
+        self, admin_url: str, migrate_step: subprocess.CompletedProcess[str]
+    ) -> None:
+        assert migrate_step.returncode == 0, migrate_step.stderr[-2000:]
+        printed = migrate_step.stdout + migrate_step.stderr
+        assert "Seeded the API key" in printed
+        assert SEED_API_KEY not in printed
+        assert SEED_API_KEY[3:] not in printed
+        with psycopg.connect(_conninfo(admin_url, OWNER, PASSWORD, MIGRATED_DB)) as conn:
+            stored = conn.execute("SELECT key_hash, key_prefix, created_by FROM api_key").fetchall()
+        assert stored == [(hashlib.sha256(SEED_API_KEY.encode()).hexdigest(), SEED_API_KEY[:10], None)]
 
 
 def _boot(env: dict[str, str], log: Path, wait: float = 60) -> int | None:
@@ -235,6 +251,17 @@ class TestBootGate:
             assert httpx.get(f"{base}/").status_code == 200
 
         assert "WEARABLES_SCHEMA_BEHIND" not in (tmp_path / "app.log").read_text()
+
+    def test_the_served_api_accepts_the_seeded_key_and_prints_no_value(
+        self, admin_url: str, runtime: psycopg.Connection, tmp_path: Path
+    ) -> None:
+        env = _script_env(admin_url, RUNTIME_LOGIN, MIGRATED_DB)
+
+        with _served(env, tmp_path / "app.log") as base:
+            headers = {**CONTEXT, "X-Open-Wearables-API-Key": SEED_API_KEY}
+            assert httpx.get(f"{base}/api/v1/users", headers=headers).status_code == 200
+
+        assert SEED_API_KEY[3:] not in (tmp_path / "app.log").read_text()
 
 
 @pytest.fixture(scope="module")

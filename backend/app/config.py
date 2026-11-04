@@ -92,6 +92,9 @@ class Settings(BaseSettings):
     # ADMIN ACCOUNT SEED
     admin_email: str = "admin@admin.com"
     admin_password: SecretStr = SecretStr("your-secure-password")
+    # T-CYK-1009 S20: the API key BH.Loop's API sends, minted into Secret Manager by the
+    # operator. The migrate step stores its hash (scripts/init/seed_api_key.py). Unset, none.
+    seed_api_key: SecretStr | None = None
 
     # Time to live for sleep state in Redis
     redis_sleep_ttl_seconds: int = 24 * 3600  # 24 hours
