@@ -7,6 +7,7 @@ from app.database import DbSession
 from app.schemas.enums import ProviderName, TimelineBucket, TimelineGroupBy
 from app.schemas.responses.activity import (
     ActivitySummary,
+    ActivityTotals,
     BodySummary,
     RecoverySummary,
     SleepSummary,
@@ -34,12 +35,32 @@ def get_activity_summary(
 ) -> PaginatedResponse[ActivitySummary]:
     """Returns daily aggregated activity metrics.
 
+    Each day reports its highest-priority source; metrics it lacks are filled from lower-priority sources.
+
     Aggregates time-series data (steps, energy, heart rate, etc.) by day.
     """
     start_datetime = parse_query_datetime(start_date)
     end_datetime = parse_query_end_datetime(end_date)
     return summaries_service.get_activity_summaries(
         db, user_id, start_datetime, end_datetime, cursor, limit, sort_order
+    )
+
+
+@router.get("/users/{user_id}/summaries/activity/totals")
+def get_activity_totals(
+    user_id: UUID,
+    start_date: DateTimeQueryParam,
+    end_date: DateTimeQueryParam,
+    db: DbSession,
+    _api_key: ApiKeyDep,
+) -> ActivityTotals:
+    """Returns the period's daily activity added up: days, steps, distance and active energy.
+
+    The same days the daily summaries return, one per date after source priority,
+    so a total matches what paging through them would add up to.
+    """
+    return summaries_service.get_activity_totals(
+        db, user_id, parse_query_datetime(start_date), parse_query_end_datetime(end_date)
     )
 
 
@@ -69,16 +90,10 @@ def get_recovery_summary(
     cursor: str | None = None,
     limit: PageLimitQueryParam = DEFAULT_PAGE_SIZE,
 ) -> PaginatedResponse[RecoverySummary]:
-    """Returns daily recovery metrics (recovery score, HRV, resting HR, SpO2).
+    """Returns daily recovery metrics (resting HR, HRV, SpO2, main sleep, recovery score).
 
-    **Warning - known limitation:** this endpoint currently returns data **only for WHOOP**.
-    Metrics are read from stored recovery-score records, which today are produced solely by
-    WHOOP, so users connected only to other providers (e.g. Apple Health) receive an empty
-    result even when the underlying resting HR, HRV and SpO2 are available. This is a bug.
-
-    These values will soon be computed from the timeseries we already store in the database
-    rather than from what a single provider reports, at which point recovery metrics will be
-    returned for all providers that supply the underlying data.
+    One row per day from the highest-priority source, for every provider that supplies the
+    underlying data. The recovery score is set only where a recovery-score record exists.
     """
     start_datetime = parse_query_datetime(start_date)
     end_datetime = parse_query_end_datetime(end_date)

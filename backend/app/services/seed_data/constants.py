@@ -1,6 +1,5 @@
 """Constants and configuration for seed data generation."""
 
-import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -8,9 +7,9 @@ from pathlib import Path
 import yaml
 
 from app.schemas.enums import ProviderName, SeriesType, WorkoutType
-from app.utils.structured_logging import log_structured
+from app.utils.structured_logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Provider & demographic constants
@@ -59,6 +58,20 @@ PROVIDER_CONFIGS: dict[ProviderName, dict] = {
 
 SEED_PROVIDERS = list(PROVIDER_CONFIGS.keys())
 
+# Series the daily activity summary aggregates per (day, provider, device).
+# Seeded from one device so that device's day carries all of them.
+DAILY_ACTIVITY_SERIES: frozenset[SeriesType] = frozenset(
+    {
+        SeriesType.steps,
+        SeriesType.active_energy,
+        SeriesType.basal_energy,
+        SeriesType.heart_rate,
+        SeriesType.distance_walking_running,
+        SeriesType.flights_climbed,
+        SeriesType.active_time,
+    }
+)
+
 # Workout types where elevation gain is realistic
 OUTDOOR_WORKOUT_TYPES: frozenset[WorkoutType] = frozenset(
     {
@@ -75,6 +88,16 @@ OUTDOOR_WORKOUT_TYPES: frozenset[WorkoutType] = frozenset(
         WorkoutType.DOWNHILL_SKIING,
     }
 )
+
+
+DEFAULT_MEAL_TYPES: tuple[str, ...] = ("breakfast", "lunch", "dinner", "snack")
+
+MEAL_TITLES: dict[str, list[str]] = {
+    "breakfast": ["Oatmeal with Berries", "Scrambled Eggs & Toast", "Greek Yogurt Bowl", "Avocado Toast"],
+    "lunch": ["Grilled Chicken Salad", "Turkey Sandwich", "Quinoa Bowl", "Vegetable Stir Fry"],
+    "dinner": ["Salmon with Rice", "Pasta Bolognese", "Grilled Steak & Veggies", "Vegetable Curry"],
+    "snack": ["Protein Bar", "Mixed Nuts", "Apple with Peanut Butter", "Greek Yogurt"],
+}
 
 # ---------------------------------------------------------------------------
 # Health score component keys (match real provider API formats)
@@ -159,9 +182,7 @@ def _load_series_type_config() -> tuple[dict[SeriesType, SeriesTypeGenSpec], lis
         with open(config_path, encoding="utf-8") as f:
             config = yaml.safe_load(f) or {}
     except FileNotFoundError:
-        log_structured(
-            logger,
-            "warning",
+        logger.warning(
             "series_type_config.yaml not found - time series generation will be skipped",
             provider="seed_data_service",
             task="load_config",
@@ -172,12 +193,11 @@ def _load_series_type_config() -> tuple[dict[SeriesType, SeriesTypeGenSpec], lis
         try:
             cadence = Cadence(vals["cadence"])
         except (KeyError, ValueError):
-            log_structured(
-                logger,
-                "warning",
-                f"Skipping '{name}' - missing or invalid cadence",
+            logger.warning(
+                "Skipping series type - missing or invalid cadence",
                 provider="seed_data_service",
                 task="load_config",
+                series_type=name,
             )
             continue
 
@@ -219,12 +239,11 @@ def _parse_paired(name: str, vals: dict) -> PairedGenSpec | None:
         frequency = Cadence(vals.get("frequency", "daily"))
         return PairedGenSpec(cadence=frequency, members=members)
     except (KeyError, ValueError):
-        log_structured(
-            logger,
-            "warning",
-            f"Skipping paired entry '{name}' - malformed members or frequency",
+        logger.warning(
+            "Skipping paired entry - malformed members or frequency",
             provider="seed_data_service",
             task="load_config",
+            series_type=name,
         )
         return None
 
@@ -235,12 +254,11 @@ def _parse_workout_types(raw: list[str]) -> frozenset[WorkoutType]:
         try:
             result.add(WorkoutType(wt))
         except ValueError:
-            log_structured(
-                logger,
-                "warning",
-                f"Unknown workout type '{wt}' in series_type_config.yaml",
+            logger.warning(
+                "Unknown workout type in series_type_config.yaml",
                 provider="seed_data_service",
                 task="load_config",
+                workout_type=wt,
             )
     return frozenset(result)
 

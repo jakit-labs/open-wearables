@@ -19,6 +19,18 @@ This page covers **how** to run the scripts. The rationale for each individual m
 
 In this fork no data migration runs at startup: `backend/scripts/start/app.sh` only checks that the schema is at the Alembic head and serves, and `backend/scripts/start/migrate.sh` applies Alembic migrations and seeds as their own step. Every script in `backend/scripts/data_migrations/` is run manually (see below).
 
+### Run-once scripts
+
+Some scripts are expensive to run even when there is nothing left to fix, because checking means scanning a large table. These run **at most once per instance**: a clean run writes a row with the script's name to the `data_migration` table, and from then on the script prints `already completed, skipping` and exits, both on startup and when run manually. A run that fails or is interrupted writes nothing, so it is retried on the next startup. When several replicas start at once, only one runs the script; the others skip it.
+
+To run such a script again, delete its row first:
+
+```sql
+DELETE FROM data_migration WHERE name = '<script_name>';
+```
+
+`--dry-run` never writes the row.
+
 ## Prerequisites
 
 The scripts import from the `app` package and connect to the database via the environment variables in `backend/config/.env`. You need:

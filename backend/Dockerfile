@@ -17,11 +17,11 @@ FROM python:3.14-slim AS builder
     ENV UV_PROJECT_ENVIRONMENT=/opt/venv
     RUN uv venv $VIRTUAL_ENV
     ENV PATH="$VIRTUAL_ENV/bin:$PATH"
-    RUN uv sync --locked --no-dev --no-install-project
+    RUN uv sync --locked --no-dev --extra otel --no-install-project
 
     # Copy source and install the project itself (fast, deps already cached)
     COPY . .
-    RUN uv sync --locked --no-dev --no-editable
+    RUN uv sync --locked --no-dev --extra otel --no-editable
     # T-CYK-1009 CSO N7: the image runs the app only; tests and their hooks stay
     # out. Removed here, not in .dockerignore: a BuildKit git context (how
     # BH.Loop builds this image) does not apply .dockerignore.

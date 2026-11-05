@@ -4,17 +4,17 @@ from collections.abc import Generator
 from unittest.mock import MagicMock, patch
 
 import pytest
-from fastapi import HTTPException
 from pydantic import SecretStr
 
 from app.config import settings
-from app.services.apple.apple_xml import aws_service
-from app.services.apple.apple_xml.aws_service import (
+from app.services.providers.apple.apple_xml import aws_service
+from app.services.providers.apple.apple_xml.aws_service import (
     build_object_key,
     get_public_s3_client,
     get_s3_client,
     require_bucket_name,
 )
+from app.utils.exceptions import AppError
 
 
 def test_build_object_key_is_unique_for_same_user_and_filename() -> None:
@@ -56,7 +56,7 @@ def test_require_bucket_name_returns_configured_bucket(monkeypatch: pytest.Monke
 def test_require_bucket_name_rejects_missing_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "aws_bucket_name", None)
 
-    with pytest.raises(HTTPException) as exc:
+    with pytest.raises(AppError) as exc:
         require_bucket_name()
 
     assert exc.value.status_code == 503
@@ -68,7 +68,9 @@ def test_internal_s3_client_is_created_once(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(settings, "aws_endpoint_url", "http://minio:9000")
     client = MagicMock()
 
-    with patch("app.services.apple.apple_xml.aws_service.create_s3_client", return_value=client) as create_client:
+    with patch(
+        "app.services.providers.apple.apple_xml.aws_service.create_s3_client", return_value=client
+    ) as create_client:
         assert get_s3_client() is client
         assert get_s3_client() is client
 
@@ -82,7 +84,7 @@ def test_public_s3_client_is_cached_separately(monkeypatch: pytest.MonkeyPatch) 
     public_client = MagicMock()
 
     with patch(
-        "app.services.apple.apple_xml.aws_service.create_s3_client",
+        "app.services.providers.apple.apple_xml.aws_service.create_s3_client",
         return_value=public_client,
     ) as create_client:
         assert get_public_s3_client() is public_client
@@ -102,5 +104,5 @@ def test_missing_credentials_are_not_cached_and_recover(monkeypatch: pytest.Monk
     client = MagicMock()
     monkeypatch.setattr(settings, "aws_access_key_id", "test-key")
     monkeypatch.setattr(settings, "aws_secret_access_key", SecretStr("test-secret"))
-    with patch("app.services.apple.apple_xml.aws_service.create_s3_client", return_value=client):
+    with patch("app.services.providers.apple.apple_xml.aws_service.create_s3_client", return_value=client):
         assert get_s3_client() is client

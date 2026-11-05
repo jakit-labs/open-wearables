@@ -1,3 +1,4 @@
+import asyncio
 import contextlib
 import logging
 import time
@@ -6,12 +7,15 @@ from typing import Any
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.datastructures import Headers
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.config import settings
+from app.services.endpoint_usage import caller_type, endpoint_usage, route_key
 from app.utils.config_utils import AccessLogLevel
-from app.utils.structured_logging import log_structured
+from app.utils.structured_logging import get_logger
 
-logger = logging.getLogger("app.access")
+logger = get_logger("app.access")
 
 
 def _route_template(request: Request) -> str | None:
@@ -56,7 +60,7 @@ def add_access_log_middleware(app: FastAPI) -> None:
             attributes["error_type"] = type(error).__name__
         # a logging failure must never break request handling
         with contextlib.suppress(Exception):
-            log_structured(logger, "error" if status >= 400 else "info", "http_request", **attributes)
+            logger.log(logging.ERROR if status >= 400 else logging.INFO, "http_request", **attributes)
 
     @app.middleware("http")
     async def access_log(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
@@ -71,3 +75,56 @@ def add_access_log_middleware(app: FastAPI) -> None:
 
         emit(request, response.status_code, round((time.perf_counter() - start) * 1000, 1))
         return response
+
+
+class _EndpointUsageMiddleware:
+    """Counts requests per route template for the telemetry ping.
+
+    Plain ASGI rather than BaseHTTPMiddleware: the count is taken when the response
+    starts, so a long-lived stream is counted once up front and never buffered.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        recorded = False
+
+        async def send_and_record(message: Message) -> None:
+            nonlocal recorded
+            if message["type"] == "http.response.start" and not recorded:
+                recorded = True
+                _record_endpoint_usage(scope, message["status"])
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_and_record)
+        except Exception:
+            # Unhandled exception: the 500 is sent by the server error middleware above us.
+            if not recorded:
+                _record_endpoint_usage(scope, 500)
+            raise
+
+
+def _record_endpoint_usage(scope: Scope, status: int) -> None:
+    # telemetry must never break request handling
+    with contextlib.suppress(Exception):
+        key = route_key(scope, status)
+        if key is None:
+            return
+        headers = Headers(scope=scope)
+        auth = caller_type(headers.get("authorization"), headers.get("x-open-wearables-api-key"))
+        endpoint_usage.record(key, auth, status)
+        if endpoint_usage.claim_flush():
+            # Redis I/O stays off the event loop.
+            asyncio.get_running_loop().run_in_executor(None, endpoint_usage.flush)
+
+
+def add_endpoint_usage_middleware(app: FastAPI) -> None:
+    # Not installed at all when opted out, so a disabled instance counts nothing.
+    if settings.telemetry_enabled:
+        app.add_middleware(_EndpointUsageMiddleware)

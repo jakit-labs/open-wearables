@@ -283,9 +283,11 @@ def served_output(
         )
         assert login.status_code == 200
         bearer = {"Authorization": f"Bearer {login.json()['access_token']}"}
-        # no such user: the refresh-token insert breaks its foreign key, an unhandled 500
-        token = httpx.post(f"{base}/api/v1/users/{PROBE_USER_ID}/token", headers=bearer, json={})
-        assert token.status_code == 500
+        # an external id longer than its varchar(255) column: the insert raises DataError, an
+        # unhandled 500 with the request value bound in the statement (upstream #1972 answers a
+        # foreign-key violation, the earlier trigger here, as a 400 client error)
+        created = httpx.post(f"{base}/api/v1/users", headers=bearer, json={"external_user_id": PROBE_USER_ID * 8})
+        assert created.status_code == 500
         trigger.touch()
         deadline = time.monotonic() + 60
         while not (folder / "emit.done").exists() and time.monotonic() < deadline:
@@ -304,7 +306,7 @@ class TestServedApiLogs:
     def test_an_unhandled_500_prints_no_request_value(self, served_output: list[str]) -> None:
         leaks = [line for line in served_output if PROBE_USER_ID in line]
         assert leaks == [], f"{len(leaks)} line(s) carry the request's user id: {leaks[:3]}"
-        assert any(record.get("error_type") == "IntegrityError" for record in _records(served_output))
+        assert any(record.get("error_type") == "DataError" for record in _records(served_output))
 
     def test_uvicorns_exception_report_prints_no_reading(self, served_output: list[str]) -> None:
         leaks = [line for line in served_output if "173.917" in line]
