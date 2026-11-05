@@ -2,6 +2,7 @@
 
 import json
 import os
+from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
@@ -185,6 +186,12 @@ class TestOptOutSettings:
 
 
 class TestSendPing:
+    @pytest.fixture(autouse=True)
+    def _telemetry_on(self) -> Iterator[None]:
+        # BH.Loop fork (T-CYK-1009): telemetry is off by default; these tests exercise the ping itself.
+        with patch.object(settings, "telemetry_enabled", True):
+            yield
+
     def test_disabled_via_settings_sends_nothing(self, db: Session) -> None:
         with (
             patch.object(settings, "telemetry_enabled", False),

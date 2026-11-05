@@ -3,6 +3,10 @@ title: "Exporting logs with OpenTelemetry"
 description: "Send backend logs to an OTLP collector in addition to stdout"
 ---
 
+<Warning>
+This fork (BH.Loop, T-CYK-1009) refuses log export. The exporter ships log attributes that the stdout log allowlist drops, so with `OTEL_ENABLED=true` every backend process stops at startup with `OTEL_ENABLED is refused in this fork: log export would bypass the log allowlist`. The rest of this page describes upstream.
+</Warning>
+
 The backend can send its logs to any collector that accepts OTLP over HTTP (the OpenTelemetry Collector, Grafana Alloy, Datadog Agent, and others). Export is off by default. When it is on, the container output does not change: every line still goes to stdout in the format chosen with `LOG_FORMAT` (see [Logs](/deployment/docker#logs)).
 
 Only logs are exported. Traces and metrics are not.

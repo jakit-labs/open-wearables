@@ -71,6 +71,7 @@ class Settings(BaseSettings):
     log_level: LogLevel | None = None
     # Export logs over OTLP/HTTP as well (needs the `otel` extra). Endpoint, headers and
     # resource come from the standard OTEL_* variables; OTEL_SDK_DISABLED=true also turns it off.
+    # BH.Loop fork (T-CYK-1009 AC-5): refused, see _refuse_otel_export.
     otel_enabled: bool = False
     # Comma-separated attribute names, added to the built-in list, whose values are
     # replaced with "REDACTED" in exported logs. Matching ignores case.
@@ -388,7 +389,9 @@ class Settings(BaseSettings):
     # TELEMETRY SETTINGS
     # Anonymous usage telemetry: aggregate counts and config flags only, never
     # user data - see docs/dev-guides/telemetry.mdx for the full payload.
-    telemetry_enabled: bool = True  # also off with DO_NOT_TRACK=1
+    # BH.Loop fork (T-CYK-1009): off by default; the sidecar sends nothing to the
+    # telemetry endpoint unless TELEMETRY_ENABLED=true is set on purpose.
+    telemetry_enabled: bool = False  # also off with DO_NOT_TRACK=1
     telemetry_endpoint_url: str = "https://telemetry.openwearables.io/api/v1/pings"
     telemetry_beat_interval_seconds: float = 3600.0  # how often to check if a ping is due
     telemetry_send_interval_seconds: float = 86400.0  # min gap between "daily" pings
@@ -454,6 +457,15 @@ class Settings(BaseSettings):
         if self.google_webhook_secret is None or self.google_webhook_secret.get_secret_value() == "":
             self.google_webhook_secret = SecretStr(self.secret_key)
         return self
+
+    @field_validator("otel_enabled", mode="after")
+    @classmethod
+    def _refuse_otel_export(cls, enabled: bool) -> bool:
+        # BH.Loop fork (T-CYK-1009 AC-5): the exporter ships record attributes past the log
+        # allowlist, so every process (API, worker, beat, migrate) refuses to start with it.
+        if enabled:
+            raise ValueError("OTEL_ENABLED is refused in this fork: log export would bypass the log allowlist")
+        return enabled
 
     @field_validator("secret_key", mode="after")
     @classmethod
