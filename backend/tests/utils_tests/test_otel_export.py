@@ -5,6 +5,7 @@ without it.
 """
 
 import dataclasses
+import json
 import logging
 import threading
 import time
@@ -168,7 +169,9 @@ class TestStructuredExport:
     def test_stdout_is_unchanged(self, exporter: Any, capsys: pytest.CaptureFixture[str]) -> None:
         app_logger.info("printed", user_id="u1")
 
-        assert capsys.readouterr().out.endswith('"message": "printed", "provider": null, "user_id": "u1"}\n')
+        # BH.Loop fork (T-CYK-1009 AC-5): stdout is the allowlisted line, whatever is exported.
+        line = json.loads(capsys.readouterr().out)
+        assert (line["event"], "user_id" in line) == ("printed", False)
         assert len(_exported(exporter)) == 1
 
     def test_respects_log_level(self) -> None:
@@ -335,7 +338,8 @@ class TestCeleryLogging:
         celery_logger = logging.getLogger("celery")
         saved = (celery_logger.handlers[:], celery_logger.level, celery_logger.propagate)
         try:
-            celery_core.setup_celery_logging()
+            # BH.Loop fork: the root level is the command's --loglevel; name INFO here.
+            celery_core.setup_celery_logging(loglevel=logging.INFO)
             logging.getLogger("celery.worker").info("celery: Warm shutdown")
         finally:
             celery_logger.handlers[:], level, celery_logger.propagate = saved

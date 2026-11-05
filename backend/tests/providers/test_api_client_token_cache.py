@@ -10,6 +10,7 @@ from freezegun import freeze_time
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.integrations.redis_client import get_redis_client
 from app.repositories import UserConnectionRepository
 from app.services.providers import api_client
@@ -123,8 +124,9 @@ def test_request_retries_with_token_refreshed_elsewhere(db: Session, connection:
     stale_token = get_valid_token(db, connection.user_id, "whoop", repo, MagicMock())
     # Raw SQL, like another worker's session: the connection instance in this session stays stale.
     db.execute(
-        text("UPDATE user_connection SET access_token = 'refreshed-by-another-worker' WHERE id = :id"),
-        {"id": connection.id},
+        # BH.Loop fork (T-CYK-1009 AC-3): the column holds Fernet ciphertext, as another worker writes it.
+        text("UPDATE user_connection SET access_token = :token WHERE id = :id"),
+        {"id": connection.id, "token": settings.token_fernet().encrypt(b"refreshed-by-another-worker").decode()},
     )
     client = _client_returning(_response(401), _response(200, json={"ok": True}))
 
@@ -138,8 +140,9 @@ def test_request_retries_with_token_refreshed_elsewhere(db: Session, connection:
 def test_download_retries_with_token_refreshed_elsewhere(db: Session, connection: Any, repo: Any) -> None:
     stale_token = get_valid_token(db, connection.user_id, "whoop", repo, MagicMock())
     db.execute(
-        text("UPDATE user_connection SET access_token = 'refreshed-by-another-worker' WHERE id = :id"),
-        {"id": connection.id},
+        # BH.Loop fork (T-CYK-1009 AC-3): the column holds Fernet ciphertext, as another worker writes it.
+        text("UPDATE user_connection SET access_token = :token WHERE id = :id"),
+        {"id": connection.id, "token": settings.token_fernet().encrypt(b"refreshed-by-another-worker").decode()},
     )
     request = httpx.Request("GET", f"{API_BASE_URL}/file")
     sent_auth: list[str] = []

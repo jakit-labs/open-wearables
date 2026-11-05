@@ -19,6 +19,7 @@ from celery.exceptions import Retry
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.integrations.celery.tasks.webhook_push_task import process_webhook_push
 from app.repositories import UserConnectionRepository
 from app.schemas.auth import ConnectionStatus
@@ -749,8 +750,9 @@ class TestGarminDeregistrationWebhook:
         connection = UserConnectionFactory(user=UserFactory(), provider="garmin", provider_user_id="garmin_user_123")
         get_valid_token(task_db, connection.user_id, "garmin", UserConnectionRepository(), MagicMock())
         task_db.execute(
-            text("UPDATE user_connection SET access_token = 'refreshed-by-another-worker' WHERE id = :id"),
-            {"id": connection.id},
+            # BH.Loop fork (T-CYK-1009 AC-3): the column holds Fernet ciphertext, as another worker writes it.
+            text("UPDATE user_connection SET access_token = :token WHERE id = :id"),
+            {"id": connection.id, "token": settings.token_fernet().encrypt(b"refreshed-by-another-worker").decode()},
         )
         mock_garmin_user_id.side_effect = None
         mock_garmin_user_id.return_value = "garmin_user_123"

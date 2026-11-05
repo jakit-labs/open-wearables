@@ -66,7 +66,12 @@ if os.environ.get("INSTALL_PROVIDERS") == "1":
     control_uses = len(uses)
     uses.clear()
 
+import app.access_audit
 import app.main
+
+# BH.Loop fork (T-CYK-1009 AC-1): the audit middleware answers 503 when it cannot write its
+# row, and this child has no database; keep the row in memory so the probe reaches the routes.
+app.access_audit._insert = lambda row: None
 
 api = app.main.api
 

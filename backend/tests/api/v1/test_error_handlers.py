@@ -183,8 +183,8 @@ class TestInvalidInput:
         assert response.status_code == 422
         assert response.json()["detail"].startswith("body.email: value is not a valid email address")
         line = _access_log(log, 422)
-        assert line["error_cause_type"] == "RequestValidationError"
-        assert line["error_cause_msg"] == "body.email"
+        # BH.Loop fork (T-CYK-1009 AC-5): the access log carries no error_cause_* fields.
+        assert "error_cause_type" not in line
         assert "jane.doe" not in str(line)
 
     def test_request_validation_error_lists_every_failure_without_the_values(
@@ -260,8 +260,8 @@ class TestIntegrityErrors:
         assert response.status_code == 409
         assert response.json() == _problem(409, "User already exists.", "CONFLICT")
         line = _access_log(log, 409)
-        assert line["error_cause_type"] == "UniqueViolation"
-        assert line["error_cause_msg"] == "constraint user_external_user_id_key"
+        # BH.Loop fork (T-CYK-1009 AC-5): the access log carries no error_cause_* fields.
+        assert "error_cause_type" not in line
         assert "taken" not in str(line)
 
     def test_a_unique_violation_reaching_the_handler_alerts(

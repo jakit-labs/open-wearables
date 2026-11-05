@@ -79,7 +79,7 @@ def _assert_warned(caplog: pytest.LogCaptureFixture, error_type: str) -> None:
     [record] = [record for record in caplog.records if record.name == "app.services.s3_client"]
     assert record.levelname == "WARNING"
     assert record.getMessage() == "Cannot create S3 client"
-    assert getattr(record, "structured")["error_type"] == error_type
+    assert getattr(record, "structured")["attributes"]["error_type"] == error_type
 
 
 class TestCreateS3ClientWithoutCredentials:
