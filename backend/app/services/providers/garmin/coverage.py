@@ -20,10 +20,12 @@ ACTIVITY_SAMPLE_SERIES: list[tuple[str, SeriesType]] = [
 DAILIES_SERIES: list[tuple[str, SeriesType]] = [
     ("steps", SeriesType.steps),
     ("active_calories", SeriesType.active_energy),
+    ("bmr_calories", SeriesType.basal_energy),
     ("resting_heart_rate", SeriesType.resting_heart_rate),
     ("floors_climbed", SeriesType.flights_climbed),
     ("distance_meters", SeriesType.distance_walking_running),
     ("active_time", SeriesType.active_time),
+    ("exercise_time", SeriesType.exercise_time),
 ]
 
 # Epoch sample category → SeriesType (/wellness-api/rest/epochs).
@@ -42,6 +44,8 @@ TIMESERIES: frozenset[SeriesType] = frozenset(
         SeriesType.body_fat_percentage,  # /wellness-api/rest/bodyComps
         SeriesType.body_mass_index,  # /wellness-api/rest/bodyComps
         SeriesType.skeletal_muscle_mass,  # /wellness-api/rest/bodyComps
+        SeriesType.bone_mass,  # /wellness-api/rest/bodyComps
+        SeriesType.body_water_percentage,  # /wellness-api/rest/bodyComps
         SeriesType.heart_rate_variability_rmssd,  # /wellness-api/rest/hrv + healthSnapshot
         SeriesType.heart_rate_variability_sdnn,  # /wellness-api/rest/healthSnapshot
         SeriesType.garmin_stress_level,  # /wellness-api/rest/stressDetails + healthSnapshot
@@ -52,7 +56,7 @@ TIMESERIES: frozenset[SeriesType] = frozenset(
         SeriesType.blood_pressure_diastolic,  # /wellness-api/rest/bloodPressures
         SeriesType.vo2_max,  # /wellness-api/rest/userMetrics
         SeriesType.garmin_fitness_age,  # /wellness-api/rest/userMetrics
-        SeriesType.skin_temperature,  # /wellness-api/rest/skinTemp
+        SeriesType.skin_temperature_deviation,  # /wellness-api/rest/skinTemp (avgDeviationCelsius)
     }
 )
 
@@ -119,3 +123,6 @@ HEALTH_SCORES: frozenset[HealthScoreCategory] = frozenset(
         HealthScoreCategory.BODY_BATTERY,
     }
 )
+
+# Activity ``activeKilocalories`` includes BMR despite its name (Activity API 1.2.4), unlike the dailies field.
+WORKOUT_ENERGY_SERIES = SeriesType.total_energy

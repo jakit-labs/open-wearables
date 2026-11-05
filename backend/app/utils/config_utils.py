@@ -1,3 +1,5 @@
+import hashlib
+import hmac
 import os
 import re
 from datetime import timedelta
@@ -29,6 +31,11 @@ def parse_duration(value: str) -> timedelta:
     return timedelta(seconds=total_seconds)
 
 
+def derive_secret(secret_key: str, purpose: str) -> str:
+    """A secret for one purpose that doesn't reveal SECRET_KEY, for values a provider receives."""
+    return hmac.new(secret_key.encode(), purpose.encode(), hashlib.sha256).hexdigest()
+
+
 def format_duration(value: timedelta) -> str:
     """Render a timedelta as a compact string, omitting zero parts (e.g. '2d', '1d12h', '1h30m')."""
     total_seconds = int(value.total_seconds())
@@ -50,6 +57,20 @@ class AccessLogLevel(str, Enum):
     ALL = "all"  # log every request
     ERRORS = "errors"  # log only 4xx/5xx
     OFF = "off"  # log nothing
+
+
+class LogFormat(str, Enum):
+    LEGACY = "legacy"
+    JSON = "json"
+    TEXT = "text"
+
+
+class LogLevel(str, Enum):
+    DEBUG = "DEBUG"
+    INFO = "INFO"
+    WARNING = "WARNING"
+    ERROR = "ERROR"
+    CRITICAL = "CRITICAL"
 
 
 class Decryptor(Protocol):

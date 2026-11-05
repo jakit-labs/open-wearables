@@ -2,14 +2,16 @@
 Unit tests for refresh token service.
 """
 
+from unittest.mock import patch
+
 import pytest
-from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from app.models import RefreshToken
-from app.schemas.auth import TokenType
+from app.schemas.auth import SDKTokenOrigin, TokenType
 from app.services.refresh_token_service import refresh_token_service
-from tests.factories import DeveloperFactory, UserFactory
+from app.utils.exceptions import AuthenticationError, NotFoundError
+from tests.factories import ApplicationFactory, DeveloperFactory, UserFactory
 
 
 class TestCreateSDKRefreshToken:
@@ -19,10 +21,9 @@ class TestCreateSDKRefreshToken:
         """SDK refresh token should have rt- prefix and be 35 characters total."""
         # Arrange
         user = UserFactory()
-        app_id = "test_app_123"
 
         # Act
-        token = refresh_token_service.create_sdk_refresh_token(db, user.id, app_id)
+        token = refresh_token_service.create_sdk_refresh_token(db, user.id, SDKTokenOrigin.ADMIN)
 
         # Assert
         assert token.startswith("rt-")
@@ -32,17 +33,21 @@ class TestCreateSDKRefreshToken:
         """SDK refresh token should be stored in database with correct metadata."""
         # Arrange
         user = UserFactory()
-        app_id = "test_app_123"
+        application = ApplicationFactory(developer=DeveloperFactory())
 
         # Act
-        token = refresh_token_service.create_sdk_refresh_token(db, user.id, app_id)
+        token = refresh_token_service.create_sdk_refresh_token(
+            db, user.id, SDKTokenOrigin.APPLICATION, application_id=application.id
+        )
 
         # Assert
         db_token = db.query(RefreshToken).filter(RefreshToken.id == token).first()
         assert db_token is not None
         assert db_token.token_type == TokenType.SDK
         assert db_token.user_id == user.id
-        assert db_token.app_id == app_id
+        assert db_token.origin == SDKTokenOrigin.APPLICATION
+        assert db_token.application_id == application.id
+        assert db_token.issued_by_developer_id is None
         assert db_token.developer_id is None
         assert db_token.revoked_at is None
 
@@ -76,7 +81,8 @@ class TestCreateDeveloperRefreshToken:
         assert db_token.token_type == TokenType.DEVELOPER
         assert db_token.developer_id == developer.id
         assert db_token.user_id is None
-        assert db_token.app_id is None
+        assert db_token.origin is None
+        assert db_token.application_id is None
         assert db_token.revoked_at is None
 
 
@@ -87,8 +93,7 @@ class TestRefreshToken:
         """Refreshing SDK token should return new access token and rotated refresh token."""
         # Arrange
         user = UserFactory()
-        app_id = "test_app_123"
-        refresh_token = refresh_token_service.create_sdk_refresh_token(db, user.id, app_id)
+        refresh_token = refresh_token_service.create_sdk_refresh_token(db, user.id, SDKTokenOrigin.ADMIN)
 
         # Act
         result = refresh_token_service.refresh_token(db, refresh_token)
@@ -122,7 +127,7 @@ class TestRefreshToken:
         invalid_token = "rt-invalidtoken12345678901234567890"
 
         # Act & Assert
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(AuthenticationError) as exc_info:
             refresh_token_service.refresh_token(db, invalid_token)
 
         assert exc_info.value.status_code == 401
@@ -132,11 +137,11 @@ class TestRefreshToken:
         """Refreshing revoked token should raise 401."""
         # Arrange
         user = UserFactory()
-        refresh_token = refresh_token_service.create_sdk_refresh_token(db, user.id, "test_app")
+        refresh_token = refresh_token_service.create_sdk_refresh_token(db, user.id, SDKTokenOrigin.ADMIN)
         refresh_token_service.revoke_token(db, refresh_token)
 
         # Act & Assert
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(AuthenticationError) as exc_info:
             refresh_token_service.refresh_token(db, refresh_token)
 
         assert exc_info.value.status_code == 401
@@ -145,7 +150,7 @@ class TestRefreshToken:
         """Refreshing token should revoke the old token (rotation)."""
         # Arrange
         user = UserFactory()
-        old_refresh_token = refresh_token_service.create_sdk_refresh_token(db, user.id, "test_app")
+        old_refresh_token = refresh_token_service.create_sdk_refresh_token(db, user.id, SDKTokenOrigin.ADMIN)
 
         # Verify not revoked initially
         db_token = db.query(RefreshToken).filter(RefreshToken.id == old_refresh_token).first()
@@ -164,6 +169,36 @@ class TestRefreshToken:
         assert new_db_token is not None
         assert new_db_token.revoked_at is None
 
+    @pytest.mark.parametrize("token_type", [TokenType.SDK, TokenType.DEVELOPER])
+    def test_refresh_keeps_old_token_usable_when_issuing_tokens_fails(self, db: Session, token_type: TokenType) -> None:
+        """A refresh that fails to issue the new pair must not burn the old token."""
+        # Arrange
+        if token_type == TokenType.SDK:
+            old_refresh_token = refresh_token_service.create_sdk_refresh_token(
+                db, UserFactory().id, SDKTokenOrigin.ADMIN
+            )
+            failing_step = "create_sdk_refresh_token"
+        else:
+            old_refresh_token = refresh_token_service.create_developer_refresh_token(db, DeveloperFactory().id)
+            failing_step = "create_developer_refresh_token"
+
+        # Act
+        with (
+            patch.object(refresh_token_service, failing_step, side_effect=RuntimeError("db down")),
+            pytest.raises(RuntimeError),
+        ):
+            refresh_token_service.refresh_token(db, old_refresh_token)
+        db.rollback()  # what the request's session dependency does on an error
+
+        # Assert
+        old_row = db.get(RefreshToken, old_refresh_token)
+        assert old_row is not None
+        assert old_row.revoked_at is None
+        result = refresh_token_service.refresh_token(db, old_refresh_token)
+        db.refresh(old_row)
+        assert old_row.revoked_at is not None
+        assert db.get(RefreshToken, result.refresh_token) is not None
+
 
 class TestRevokeToken:
     """Tests for revoke_token method."""
@@ -172,7 +207,7 @@ class TestRevokeToken:
         """Revoking token should set revoked_at timestamp."""
         # Arrange
         user = UserFactory()
-        refresh_token = refresh_token_service.create_sdk_refresh_token(db, user.id, "test_app")
+        refresh_token = refresh_token_service.create_sdk_refresh_token(db, user.id, SDKTokenOrigin.ADMIN)
 
         # Act
         result = refresh_token_service.revoke_token(db, refresh_token)
@@ -189,7 +224,7 @@ class TestRevokeToken:
         invalid_token = "rt-nonexistent123456789012345678"
 
         # Act & Assert
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(NotFoundError) as exc_info:
             refresh_token_service.revoke_token(db, invalid_token)
 
         assert exc_info.value.status_code == 404
@@ -198,11 +233,11 @@ class TestRevokeToken:
         """Revoking already revoked token should raise 404."""
         # Arrange
         user = UserFactory()
-        refresh_token = refresh_token_service.create_sdk_refresh_token(db, user.id, "test_app")
+        refresh_token = refresh_token_service.create_sdk_refresh_token(db, user.id, SDKTokenOrigin.ADMIN)
         refresh_token_service.revoke_token(db, refresh_token)
 
         # Act & Assert
-        with pytest.raises(HTTPException) as exc_info:
+        with pytest.raises(NotFoundError) as exc_info:
             refresh_token_service.revoke_token(db, refresh_token)
 
         assert exc_info.value.status_code == 404

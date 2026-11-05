@@ -14,6 +14,7 @@ from app.services.providers.withings.handlers.applis import SUBSCRIBED_APPLIS
 from app.services.providers.withings.oauth import WithingsOAuth
 from app.services.providers.withings.webhook_handler import WithingsWebhookHandler
 from app.services.providers.withings.webhook_service import WithingsWebhookService
+from app.utils.exceptions import WebhookVerificationError
 
 CALLBACK_URL = "https://example.com/api/v1/providers/withings/webhooks?token=secret"
 
@@ -49,10 +50,8 @@ def test_signature_requires_the_callback_token_and_a_userid() -> None:
 
 
 def test_probe_rejects_an_unauthenticated_head_request() -> None:
-    from fastapi import HTTPException
-
     assert _handler().handle_probe(_request()) is None
-    with pytest.raises(HTTPException):
+    with pytest.raises(WebhookVerificationError):
         _handler().handle_probe(_request(None))
 
 
@@ -127,7 +126,7 @@ def _service() -> WithingsWebhookService:
     return service
 
 
-def test_register_user_subscriptions_subscribes_every_missing_appli() -> None:
+def test_reconcile_user_subscribes_every_missing_appli() -> None:
     service = _service()
     with (
         patch.object(service, "_list_subscriptions", return_value=[]),
@@ -139,7 +138,7 @@ def test_register_user_subscriptions_subscribes_every_missing_appli() -> None:
     assert {call.args[2] for call in mock_change.call_args_list} == {"subscribe"}
 
 
-def test_register_user_subscriptions_revokes_our_own_profiles_when_switched_to_pull() -> None:
+def test_reconcile_user_revokes_our_own_profiles_when_switched_to_pull() -> None:
     service = _service()
     existing = [SimpleNamespace(appli=1, callbackurl=CALLBACK_URL, comment="open-wearables")]
     with (
@@ -151,7 +150,7 @@ def test_register_user_subscriptions_revokes_our_own_profiles_when_switched_to_p
     assert mock_change.call_args.args[2] == "revoke"
 
 
-def test_register_user_subscriptions_leaves_profiles_registered_by_another_host_alone() -> None:
+def test_reconcile_user_leaves_profiles_registered_by_another_host_alone() -> None:
     service = _service()
     existing = [SimpleNamespace(appli=1, callbackurl="https://other.example/webhooks?token=x", comment=None)]
     with (
@@ -163,7 +162,7 @@ def test_register_user_subscriptions_leaves_profiles_registered_by_another_host_
     mock_change.assert_not_called()
 
 
-def test_register_user_subscriptions_skips_when_the_webhook_token_is_unconfigured(
+def test_reconcile_user_skips_when_the_webhook_token_is_unconfigured(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr("app.config.settings.withings_webhook_token", None)

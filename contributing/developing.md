@@ -6,10 +6,8 @@ This guide covers setting up your local development environment for Open Wearabl
 
 - **Docker** (recommended) - [Install Docker](https://docs.docker.com/get-docker/)
 - **uv >=0.9.17** - Python package manager ([Install uv](https://docs.astral.sh/uv/)) - manages Python automatically. Upgrade with `uv self update` if needed ([docs](https://docs.astral.sh/uv/getting-started/installation/#upgrading-uv))
-- **pnpm** - Node.js package manager ([Install pnpm](https://pnpm.io/installation))
-
 For local frontend development without Docker, you'll also need:
-- **Node.js 22+** - For frontend development
+- **Bun 1.4+** - Runtime and package manager for the frontend ([Install Bun](https://bun.sh/docs/installation))
 
 ## Quick Start with Docker (Recommended)
 
@@ -19,6 +17,9 @@ The easiest way to get started is using Docker Compose:
 # Clone the repository
 git clone https://github.com/the-momentum/open-wearables.git
 cd open-wearables
+
+# Create the .env files and generate SECRET_KEY
+make init
 
 # Start all services with hot-reload (recommended for development)
 make watch
@@ -53,6 +54,7 @@ Once running, you can access:
 | `make migrate` | Apply database migrations |
 | `make create_migration m="..."` | Create new migration |
 | `make seed` | Seed sample data |
+| `make frontend_verify` | Run every frontend check CI runs |
 
 ## Local Development Without Docker
 
@@ -64,8 +66,8 @@ cd backend
 # Create virtual environment and install dependencies
 uv sync
 
-# Copy environment file
-cp config/.env.example config/.env
+# Create the .env files and generate their secrets
+make -C .. init
 
 # Run database migrations
 uv run alembic upgrade head
@@ -80,21 +82,22 @@ uv run fastapi dev app/main.py --host 0.0.0.0 --port 8000
 cd frontend
 
 # Install dependencies
-pnpm install
+bun install
 
-# Copy environment file
-cp .env.example .env
+# .env (VITE_API_URL) was created by `make init` in the backend setup above
 
-# Start development server
-pnpm dev
+# Start development server on http://localhost:3000
+bun run dev
 ```
 
 ## Environment Variables
 
-Copy the example environment files and configure as needed:
+`make init` creates the environment files from their examples and generates `SECRET_KEY`; running it again keeps the key:
 
 - Backend: `backend/config/.env.example` -> `backend/config/.env`
 - Frontend: `frontend/.env.example` -> `frontend/.env`
+
+The backend does not start while `SECRET_KEY` is empty or shorter than 32 characters.
 
 ## Development Patterns
 
@@ -102,4 +105,4 @@ For detailed code patterns and architecture guidelines, see:
 
 - [Root AGENTS.md](../AGENTS.md) - General workflow and guidelines
 - [Backend AGENTS.md](../backend/AGENTS.md) - Python/FastAPI patterns
-- [Frontend AGENTS.md](../frontend/AGENTS.md) - React/TypeScript patterns
+- [Frontend AGENTS.md](../frontend/AGENTS.md) - SvelteKit architecture, testing, and review rules

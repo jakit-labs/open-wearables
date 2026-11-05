@@ -9,14 +9,17 @@ Tests the /api/v1/users/{user_id}/connections endpoint including:
 - Error cases
 """
 
+from collections.abc import Generator
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 from uuid import UUID
 
+import httpx
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
-from app.models import DataPointSeries, DataSource, EventRecord, HealthScore, User, UserConnection, WorkoutDetails
+from app.models import DataSource, EventRecord, HealthScore, SeriesSample, User, UserConnection, WorkoutDetails
 from app.schemas.auth import ConnectionStatus
 from app.services.sdk_token_service import create_sdk_user_token
 from tests.factories import (
@@ -31,6 +34,13 @@ from tests.factories import (
     WorkoutDetailsFactory,
 )
 from tests.utils import api_key_headers, developer_auth_headers
+
+
+@pytest.fixture
+def mock_deregistration() -> Generator[MagicMock, None, None]:
+    """Disconnect calls the provider's deregistration endpoint; keep it off the network."""
+    with patch("httpx.delete") as mock:
+        yield mock
 
 
 class TestConnectionsEndpoints:
@@ -216,16 +226,16 @@ class TestConnectionsEndpoints:
         assert response.status_code == 401
 
     def test_get_connections_invalid_user_id(self, client: TestClient, db: Session) -> None:
-        """Test handling of invalid user ID format returns 400."""
+        """Test handling of invalid user ID format returns 422."""
         # Arrange
         api_key = ApiKeyFactory()
         headers = api_key_headers(api_key.plain_key)
 
-        # Act - FastAPI/Starlette validates UUID path params and returns 400 Bad Request
+        # Act - FastAPI/Starlette validates UUID path params and returns 422
         response = client.get("/api/v1/users/not-a-uuid/connections", headers=headers)
 
         # Assert
-        assert response.status_code == 400
+        assert response.status_code == 422
 
     def test_get_connections_nonexistent_user(self, client: TestClient, db: Session) -> None:
         """Test retrieving connections for a user that doesn't exist."""
@@ -299,6 +309,7 @@ class TestConnectionsEndpoints:
         assert "refresh_token" not in connection_data
 
 
+@pytest.mark.usefixtures("mock_deregistration")
 class TestDisconnectEndpoint:
     """Test suite for DELETE /api/v1/users/{user_id}/connections/{provider}."""
 
@@ -332,7 +343,7 @@ class TestDisconnectEndpoint:
             status=ConnectionStatus.ACTIVE,
             access_token="secret_access",
             refresh_token="secret_refresh",
-            token_expires_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            token_expires_at=datetime(2099, 1, 1, tzinfo=timezone.utc),
         )
         api_key = ApiKeyFactory()
         headers = api_key_headers(api_key.plain_key)
@@ -407,8 +418,8 @@ class TestDisconnectEndpoint:
         # Act
         response = client.delete(f"/api/v1/users/{user.id}/connections/not_a_provider", headers=headers)
 
-        # Assert - FastAPI returns 400 for invalid enum path params
-        assert response.status_code == 400
+        # Assert - FastAPI returns 422 for invalid enum path params
+        assert response.status_code == 422
 
     def test_disconnect_missing_api_key(self, client: TestClient, db: Session) -> None:
         """Test that request without API key is rejected."""
@@ -482,6 +493,7 @@ def sdk_token_headers(user_id: UUID, app_id: str = "app_123") -> dict[str, str]:
     return {"Authorization": f"Bearer {create_sdk_user_token(app_id, str(user_id))}"}
 
 
+@pytest.mark.usefixtures("mock_deregistration")
 class TestDisconnectWithSDKToken:
     """SDK sign-out: DELETE /users/{user_id}/connections/{provider} with an SDK user token."""
 
@@ -686,7 +698,7 @@ class TestDeleteProviderDataEndpoint:
         assert db.query(DataSource).filter_by(user_id=user.id, provider="apple").count() == 0
         assert db.query(EventRecord).filter_by(data_source_id=ds_id).count() == 0
         assert db.query(WorkoutDetails).count() == 0
-        assert db.query(DataPointSeries).filter_by(data_source_id=ds_id).count() == 0
+        assert db.query(SeriesSample).filter_by(data_source_id=ds_id).count() == 0
         assert db.query(HealthScore).filter_by(user_id=user.id, provider="apple").count() == 0
         conn = db.query(UserConnection).filter_by(user_id=user.id, provider="apple").one()
         assert conn.status == ConnectionStatus.REVOKED
@@ -863,3 +875,60 @@ class TestDisconnectDeregistration:
         # Assert
         assert response.status_code == 204
         mock_httpx_delete.assert_not_called()
+
+    @patch("httpx.post")
+    @patch("httpx.delete")
+    def test_disconnect_refreshes_expired_token_before_deregistration(
+        self, mock_httpx_delete: MagicMock, mock_httpx_post: MagicMock, client: TestClient, db: Session
+    ) -> None:
+        """An expired access token is refreshed so Garmin accepts the deregistration call."""
+        mock_httpx_post.return_value.json.return_value = {
+            "access_token": "fresh_token",
+            "refresh_token": "fresh_refresh",
+            "token_type": "Bearer",
+            "expires_in": 86400,
+        }
+        user = UserFactory()
+        UserConnectionFactory(
+            user=user,
+            provider="garmin",
+            status=ConnectionStatus.ACTIVE,
+            access_token="stale_token",
+            token_expires_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        headers = api_key_headers(ApiKeyFactory().plain_key)
+
+        response = client.delete(f"/api/v1/users/{user.id}/connections/garmin", headers=headers)
+
+        assert response.status_code == 204
+        assert mock_httpx_delete.call_args.kwargs["headers"] == {"Authorization": "Bearer fresh_token"}
+        conn = db.query(UserConnection).filter_by(user_id=user.id, provider="garmin").one()
+        assert conn.status == ConnectionStatus.REVOKED
+        assert conn.access_token is None
+
+    @patch("httpx.post")
+    @patch("httpx.delete")
+    def test_disconnect_clears_tokens_when_refresh_is_rejected(
+        self, mock_httpx_delete: MagicMock, mock_httpx_post: MagicMock, client: TestClient, db: Session
+    ) -> None:
+        """A rejected refresh revokes the connection; disconnect must still clear its tokens."""
+        mock_httpx_post.return_value.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "401", request=MagicMock(), response=MagicMock(status_code=401, text="invalid_grant")
+        )
+        user = UserFactory()
+        UserConnectionFactory(
+            user=user,
+            provider="garmin",
+            status=ConnectionStatus.ACTIVE,
+            token_expires_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        headers = api_key_headers(ApiKeyFactory().plain_key)
+
+        response = client.delete(f"/api/v1/users/{user.id}/connections/garmin", headers=headers)
+
+        assert response.status_code == 204
+        mock_httpx_delete.assert_not_called()
+        conn = db.query(UserConnection).filter_by(user_id=user.id, provider="garmin").one()
+        assert conn.status == ConnectionStatus.REVOKED
+        assert conn.access_token is None
+        assert conn.refresh_token is None

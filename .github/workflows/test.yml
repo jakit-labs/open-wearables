@@ -36,7 +36,7 @@ jobs:
       ENV: test
       TEST_DATABASE_URL: postgresql+psycopg://open-wearables:open-wearables@localhost:5432/open_wearables_test
       TEST_REDIS_URL: redis://localhost:6379/0
-      SECRET_KEY: test-secret-key-for-ci
+      SECRET_KEY: test-secret-key-for-ci-at-least-32-chars
       MASTER_KEY: dGVzdC1tYXN0ZXIta2V5LWZvci10ZXN0aW5nLW9ubHk=
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -55,7 +55,7 @@ jobs:
           enable-cache: false
       - name: Install dependencies
         working-directory: backend
-        run: uv sync --group dev
+        run: uv sync --group dev --extra otel
       - name: Run tests
         working-directory: backend
         run: uv run pytest -v

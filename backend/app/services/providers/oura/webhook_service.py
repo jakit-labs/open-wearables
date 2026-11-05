@@ -8,7 +8,6 @@ Inbound webhook processing is handled by OuraWebhookHandler.
 """
 
 import itertools
-from logging import getLogger
 from typing import Any
 
 import httpx
@@ -17,14 +16,13 @@ from pydantic import ValidationError
 from app.config import settings
 from app.schemas.responses.incoming_webhooks import (
     OuraWebhookSubscription,
-    ProviderWebhookSubscription,
     WebhookOperationResult,
     WebhookSubscriptionStatus,
 )
 from app.services.providers.templates.base_webhook_service import BaseWebhookService
-from app.utils.structured_logging import log_structured
+from app.utils.structured_logging import get_logger
 
-logger = getLogger(__name__)
+logger = get_logger(__name__)
 
 OURA_WEBHOOK_API_URL = "https://api.ouraring.com/v2/webhook/subscription"
 
@@ -114,9 +112,7 @@ class OuraWebhookService(BaseWebhookService):
                     if key[0] and key[1]:
                         existing[key] = (sub["id"], sub.get("callback_url", ""))
             except httpx.HTTPError as e:
-                log_structured(
-                    logger,
-                    "error",
+                logger.error(
                     "Failed to list existing Oura subscriptions",
                     provider="oura",
                     action="oura_webhook_subscription_list_error",
@@ -148,9 +144,7 @@ class OuraWebhookService(BaseWebhookService):
                         response.raise_for_status()
                         results.append({"data_type": data_type, "event_type": event_type, "status": "updated"})
                     except httpx.HTTPError as e:
-                        log_structured(
-                            logger,
-                            "error",
+                        logger.error(
                             "Failed to update Oura webhook subscription",
                             provider="oura",
                             action="oura_webhook_subscription_update_error",
@@ -185,9 +179,7 @@ class OuraWebhookService(BaseWebhookService):
                         }
                     )
                 except httpx.HTTPError as e:
-                    log_structured(
-                        logger,
-                        "error",
+                    logger.error(
                         "Failed to register Oura webhook subscription",
                         provider="oura",
                         action="oura_webhook_subscription_register_error",
@@ -207,7 +199,12 @@ class OuraWebhookService(BaseWebhookService):
 
         return results
 
-    async def list_subscriptions(self) -> list[ProviderWebhookSubscription]:
+    async def deregister_subscriptions(self) -> list[WebhookOperationResult]:
+        """Delete every subscription (one per data type x event type)."""
+        subscriptions = await self.list_subscriptions()
+        return [await self.delete_subscription(sub.id) for sub in subscriptions]
+
+    async def list_subscriptions(self) -> list[OuraWebhookSubscription]:
         """List active Oura webhook subscriptions."""
         headers = self._get_client_headers()
 
@@ -219,14 +216,12 @@ class OuraWebhookService(BaseWebhookService):
             )
             response.raise_for_status()
             raw = response.json() or []
-            result: list[ProviderWebhookSubscription] = []
+            result: list[OuraWebhookSubscription] = []
             for item in raw if isinstance(raw, list) else []:
                 try:
                     result.append(OuraWebhookSubscription.model_validate(item))
                 except ValidationError as ve:
-                    log_structured(
-                        logger,
-                        "error",
+                    logger.error(
                         "Failed to parse Oura webhook subscription",
                         provider="oura",
                         action="oura_webhook_subscription_parse_error",
@@ -249,9 +244,7 @@ class OuraWebhookService(BaseWebhookService):
                 try:
                     return OuraWebhookSubscription.model_validate(response.json())
                 except ValidationError as ve:
-                    log_structured(
-                        logger,
-                        "error",
+                    logger.error(
                         "Failed to parse Oura webhook subscription",
                         provider="oura",
                         action="oura_webhook_subscription_parse_error",
@@ -260,9 +253,7 @@ class OuraWebhookService(BaseWebhookService):
                     )
                     return None
         except httpx.HTTPError as e:
-            log_structured(
-                logger,
-                "error",
+            logger.error(
                 "Failed to get Oura webhook subscription",
                 provider="oura",
                 action="oura_webhook_subscription_get_error",
@@ -285,9 +276,7 @@ class OuraWebhookService(BaseWebhookService):
                 )
                 response.raise_for_status()
         except httpx.HTTPError as e:
-            log_structured(
-                logger,
-                "error",
+            logger.error(
                 "Failed to delete Oura webhook subscription",
                 provider="oura",
                 action="oura_webhook_subscription_delete_error",
@@ -301,9 +290,7 @@ class OuraWebhookService(BaseWebhookService):
                 error=str(e),
             )
 
-        log_structured(
-            logger,
-            "info",
+        logger.info(
             "Oura webhook subscription deleted",
             provider="oura",
             action="oura_webhook_subscription_deleted",
@@ -347,9 +334,7 @@ class OuraWebhookService(BaseWebhookService):
                 )
                 response.raise_for_status()
         except httpx.HTTPError as e:
-            log_structured(
-                logger,
-                "error",
+            logger.error(
                 "Failed to update Oura webhook subscription",
                 provider="oura",
                 action="oura_webhook_subscription_update_error",
@@ -363,9 +348,7 @@ class OuraWebhookService(BaseWebhookService):
                 error=str(e),
             )
 
-        log_structured(
-            logger,
-            "info",
+        logger.info(
             "Oura webhook subscription updated",
             provider="oura",
             action="oura_webhook_subscription_updated",
@@ -409,9 +392,7 @@ class OuraWebhookService(BaseWebhookService):
                         }
                     )
                 except httpx.HTTPError as e:
-                    log_structured(
-                        logger,
-                        "error",
+                    logger.error(
                         "Failed to renew Oura webhook subscription",
                         provider="oura",
                         action="oura_webhook_subscription_renew_error",

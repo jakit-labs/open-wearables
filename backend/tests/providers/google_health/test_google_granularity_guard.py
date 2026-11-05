@@ -44,6 +44,7 @@ def _drive(data_247: GoogleHealth247Data, granularity: DataGranularity, calls: l
             side_effect=fake_request,
         ),
         patch.object(data_247.sleep, "load_and_save", return_value=3),
+        patch.object(data_247.nutrition, "load_and_save", return_value=0),
         patch.object(data_247.settings_repo, "get_data_granularity", return_value=granularity),
         patch("app.services.providers.google_health.data_247.store_raw_payload"),
     ):
@@ -89,9 +90,10 @@ class TestWebhookSync:
 
         with (
             patch.object(data_247, "sync_data_type", side_effect=UnsupportedGranularityError(DataGranularity.HOURLY)),
-            patch("app.services.providers.google_health.webhook_handler.log_and_capture_error") as capture,
+            patch("app.services.providers.google_health.webhook_handler.logger") as logger,
         ):
             saved = handler._fetch_and_save(MagicMock(), USER_ID, "steps", START, END)
 
         assert saved == 0
-        capture.assert_called_once()
+        logger.error.assert_called_once()
+        assert isinstance(logger.error.call_args.kwargs["exc_info"], UnsupportedGranularityError)

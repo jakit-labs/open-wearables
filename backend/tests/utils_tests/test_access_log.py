@@ -1,5 +1,7 @@
 """Tests for access-log level derivation and the access-log middleware."""
 
+import json
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -57,7 +59,7 @@ def _logged_statuses(mock: MagicMock) -> list[int]:
 class TestAccessLogMiddleware:
     def test_all_level_logs_every_status(self) -> None:
         client = _build_client(AccessLogLevel.ALL)
-        with patch("app.middlewares.log_structured") as mock:
+        with patch("app.middlewares.logger.log") as mock:
             client.get("/ok")
             client.get("/client-error")
             client.get("/boom")
@@ -65,7 +67,7 @@ class TestAccessLogMiddleware:
 
     def test_errors_level_drops_2xx_keeps_4xx_5xx(self) -> None:
         client = _build_client(AccessLogLevel.ERRORS)
-        with patch("app.middlewares.log_structured") as mock:
+        with patch("app.middlewares.logger.log") as mock:
             client.get("/ok")
             client.get("/client-error")
             client.get("/boom")
@@ -73,18 +75,18 @@ class TestAccessLogMiddleware:
 
     def test_off_level_logs_nothing(self) -> None:
         client = _build_client(AccessLogLevel.OFF)
-        with patch("app.middlewares.log_structured") as mock:
+        with patch("app.middlewares.logger.log") as mock:
             client.get("/ok")
             client.get("/client-error")
         mock.assert_not_called()
 
     def test_log_level_is_error_for_4xx_and_5xx(self) -> None:
         client = _build_client(AccessLogLevel.ALL)
-        with patch("app.middlewares.log_structured") as mock:
+        with patch("app.middlewares.logger.log") as mock:
             client.get("/ok")
             client.get("/client-error")
-        levels = [call.args[1] for call in mock.call_args_list]
-        assert levels == ["info", "error"]
+        levels = [call.args[0] for call in mock.call_args_list]
+        assert levels == [logging.INFO, logging.ERROR]
 
     def test_route_template_replaces_the_raw_path(self) -> None:
         # T-CYK-1009 AC-5: the raw path and query carry ids and secrets; only the
@@ -98,7 +100,7 @@ class TestAccessLogMiddleware:
         with patch.object(settings, "access_log_level", AccessLogLevel.ALL):
             add_access_log_middleware(app)
         client = TestClient(app)
-        with patch("app.middlewares.log_structured") as mock:
+        with patch("app.middlewares.logger.log") as mock:
             client.get("/users/s3cret-id?token=s3cret&appli=1")
             client.get("/no-such-route/s3cret-id")
         assert [call.kwargs["route"] for call in mock.call_args_list] == ["/users/{user_id}", None]
@@ -106,7 +108,25 @@ class TestAccessLogMiddleware:
 
     def test_a_500_logs_the_error_type_only(self) -> None:
         client = _build_client(AccessLogLevel.ALL)
-        with patch("app.middlewares.log_structured") as mock:
+        with patch("app.middlewares.logger.log") as mock:
             client.get("/boom")
         assert mock.call_args_list[0].kwargs["error_type"] == "RuntimeError"
         assert "kaboom" not in repr(mock.call_args_list)
+
+    def test_lines_are_written_by_the_access_logger(self, capsys: pytest.CaptureFixture[str]) -> None:
+        # BH.Loop fork: LOG_FORMAT is not followed; the line is the allowlisted JSON (T-CYK-1009 AC-5).
+        client = _build_client(AccessLogLevel.ALL)
+        client.get("/ok")
+
+        line = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert (line["logger"], line["event"]) == ("app.access", "http_request")
+
+    def test_server_errors_do_not_reach_sentry_as_log_events(self) -> None:
+        """The exception reaches Sentry through the integrations, not as a second event from
+        the log line; the line carries no traceback (T-CYK-1009 AC-5)."""
+        client = _build_client(AccessLogLevel.ALL)
+        with patch("app.middlewares.logger.log") as mock:
+            client.get("/boom")
+
+        assert "exc_info" not in mock.call_args.kwargs
+        assert "traceback" not in mock.call_args.kwargs
