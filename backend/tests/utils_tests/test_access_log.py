@@ -106,6 +106,19 @@ class TestAccessLogMiddleware:
         assert [call.kwargs["route"] for call in mock.call_args_list] == ["/users/{user_id}", None]
         assert "s3cret" not in repr(mock.call_args_list)
 
+    def test_webhook_callback_token_never_reaches_the_log(self) -> None:
+        # Upstream redacts the Strava webhook token inside a logged path (#2044); this fork
+        # logs no path at all, so neither the path token nor the verify token appears
+        # (T-CYK-1009 AC-5).
+        client = _build_client(AccessLogLevel.ALL)
+        with patch("app.middlewares.logger.log") as mock:
+            client.post("/api/v1/providers/strava/webhooks/s3cret?hub.verify_token=v3rify")
+            client.get("/ok", params={"callback_url": "https://example.com/webhooks/s3cret"})
+        logged = repr(mock.call_args_list)
+        assert "s3cret" not in logged
+        assert "v3rify" not in logged
+        assert all("path" not in call.kwargs for call in mock.call_args_list)
+
     def test_a_500_logs_the_error_type_only(self) -> None:
         client = _build_client(AccessLogLevel.ALL)
         with patch("app.middlewares.logger.log") as mock:
