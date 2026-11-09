@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   backend-test:
-    runs-on: ubuntu-latest
+    runs-on: boat-small
     services:
       postgres:
         # BH.Loop runs the sidecar database on Cloud SQL Postgres 16.
