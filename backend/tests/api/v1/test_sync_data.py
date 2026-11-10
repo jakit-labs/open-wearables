@@ -13,9 +13,11 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
+from app.repositories.data_point_series_repository import WriteCounts
 from app.schemas.auth import ConnectionStatus
 from app.services.providers.base_strategy import HistoricalSyncResult
-from app.utils.exceptions import UnsupportedProviderError
+from app.services.providers.sync_247_result import Sync247Result
+from app.utils.exceptions import ProviderNotConnectedError, UnsupportedProviderError
 from tests.factories import ApiKeyFactory, UserConnectionFactory, UserFactory
 
 
@@ -28,6 +30,7 @@ class TestSyncDataEndpoint:
         with patch("app.api.routes.v1.sync_data.factory") as mock_factory:
             mock_strategy = MagicMock()
             mock_strategy.workouts.load_data.return_value = True
+            mock_strategy.data_247.load_and_save_all.return_value = Sync247Result(provider="garmin")
             mock_factory.get_provider.return_value = mock_strategy
             yield mock_factory
 
@@ -51,6 +54,48 @@ class TestSyncDataEndpoint:
         assert data["success"] is True
         mock_provider_factory.get_provider.assert_called_once_with("garmin")
         mock_provider_factory.get_provider.return_value.workouts.load_data.assert_called_once()
+
+    def test_sync_returns_the_24_7_summary(
+        self, client: TestClient, db: Session, mock_provider_factory: MagicMock
+    ) -> None:
+        user = UserFactory()
+        api_key = ApiKeyFactory()
+        UserConnectionFactory(user=user, provider="garmin", status=ConnectionStatus.ACTIVE)
+        result = Sync247Result(provider="garmin")
+        result.record("sleep", WriteCounts(2, 1))
+        mock_provider_factory.get_provider.return_value.data_247.load_and_save_all.return_value = result
+
+        response = client.post(
+            f"/api/v1/providers/garmin/users/{user.id}/sync",
+            headers={"X-Open-Wearables-API-Key": api_key.plain_key},
+            params={"async": "false", "data_type": "247"},
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "success": True,
+            "details": {
+                "workouts": None,
+                "data_247": {
+                    "status": "success",
+                    "items_inserted": 2,
+                    "items_updated": 1,
+                    "items_reported": None,
+                    "error_code": None,
+                    "tasks": {
+                        "sleep": {
+                            "status": "success",
+                            "items_inserted": 2,
+                            "items_updated": 1,
+                            "items_reported": None,
+                            "items_skipped": 0,
+                            "truncated": False,
+                            "error_code": None,
+                        }
+                    },
+                },
+            },
+        }
 
     @patch("app.api.routes.v1.sync_data.sync_vendor_data")
     def test_sync_garmin_async_mode(
@@ -107,12 +152,8 @@ class TestSyncDataEndpoint:
         api_key = ApiKeyFactory()
         # No connection created for this user
 
-        # Configure mock to raise HTTPException for no connection
-        from fastapi import HTTPException
-
-        mock_provider_factory.get_provider.return_value.workouts.load_data.side_effect = HTTPException(
-            status_code=404,
-            detail="No active connection found for user",
+        mock_provider_factory.get_provider.return_value.workouts.load_data.side_effect = ProviderNotConnectedError(
+            "garmin"
         )
 
         # Act - use async=false to test synchronous path
@@ -171,7 +212,7 @@ class TestSyncDataEndpoint:
         assert call_kwargs["offset"] == 10
 
     def test_sync_invalid_provider(self, client: TestClient, db: Session) -> None:
-        """Test that invalid provider enum value returns 400."""
+        """Test that invalid provider enum value returns 422."""
         # Arrange
         user = UserFactory()
         api_key = ApiKeyFactory()
@@ -183,7 +224,7 @@ class TestSyncDataEndpoint:
         )
 
         # Assert
-        assert response.status_code == 400
+        assert response.status_code == 422
 
     def test_sync_provider_not_supporting_workouts(
         self,

@@ -1,33 +1,59 @@
+import asyncio
+import contextlib
+import json
 import logging
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from importlib.metadata import version
 from pathlib import Path
+from typing import Any
 
-from fastapi import FastAPI, Request, status
+from fastapi import FastAPI, Request, Response, status
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from psycopg.errors import IntegrityError as PsycopgIntegrityError
+from sqlalchemy.exc import IntegrityError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.access_audit import AccessAuditMiddleware
 from app.api import head_router
+from app.api.routes.v1.auth import login
 from app.config import settings
+from app.extensions import mount_routers
 from app.integrations.celery import create_celery
+from app.integrations.otel import init_otel, shutdown_otel
 from app.integrations.sentry import init_sentry
-from app.middlewares import add_access_log_middleware, add_cors_middleware
+from app.middlewares import add_access_log_middleware, add_cors_middleware, add_endpoint_usage_middleware
+from app.schemas.utils.problem import ValidationErrorItem
 from app.services import raw_payload_storage
+from app.services.api_key_service import API_KEY_REQUIRED
+from app.services.endpoint_usage import endpoint_usage
 from app.services.outgoing_webhooks import svix as svix_service
-from app.utils.exceptions import DatetimeParseError, handle_exception
-from app.utils.structured_logging import configure_logging
-
-# Every record leaves through the root handler's allowlist formatter, on stdout
-# (T-CYK-1009 AC-5).
-configure_logging()
+from app.utils.exceptions import (
+    AppError,
+    ConfigurationError,
+    UpstreamError,
+    app_error_from_integrity_error,
+    describe_integrity_error,
+    status_code_name,
+)
+from app.utils.logging_setup import configure_logging
+from app.utils.problem import (
+    INTERNAL_ERROR,
+    VALIDATION_ERROR,
+    add_problem_responses,
+    problem_response,
+)
+from app.utils.structured_logging import get_logger
 
 # httpx/httpcore log one INFO line per outgoing request; at our request volume that is
 # pure noise (event-type sync, provider calls, webhook delivery). Keep warnings and errors.
 for _name in ("httpx", "httpcore"):
     logging.getLogger(_name).setLevel(logging.WARNING)
+
+# Every record leaves through the allowlist formatter, on stdout (T-CYK-1009 AC-5).
+configure_logging()
+logger = get_logger(__name__)
 
 
 @asynccontextmanager
@@ -38,16 +64,35 @@ async def _lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     # handler, which prints an unhandled request's exception text, gives way to the root
     # allowlist (T-CYK-1009 AC-5).
     logging.getLogger("uvicorn.access").disabled = True
-    for name in ("uvicorn", "uvicorn.error"):
-        logging.getLogger(name).handlers.clear()
-        logging.getLogger(name).propagate = True
+    # The same dictConfig resets the uvicorn loggers, so apply the allowlist and LOG_LEVEL again.
+    configure_logging()
+    # Here, not at import: Celery workers import this module too and start their own export.
+    init_otel("open-wearables-api")
+    # After init_otel, so the notice is exported too.
+    if settings.telemetry_enabled:
+        logger.info(
+            "Anonymous usage telemetry is enabled (aggregate counts only, no user data). "
+            "See docs/dev-guides/telemetry.mdx - disable with TELEMETRY_ENABLED=false."
+        )
     svix_service.register_event_types()
     yield
+    # Hand the last partial interval of telemetry counters to Redis before exiting.
+    with contextlib.suppress(Exception):
+        await asyncio.to_thread(endpoint_usage.flush)
+    await asyncio.to_thread(shutdown_otel)
 
 
-api = FastAPI(title=settings.api_name, version=version("open-wearables"), lifespan=_lifespan)
-celery_app = create_celery()
+# FastAPI >= 0.142 records its own OpenTelemetry request traces, metrics and exception logs by
+# default, and sets up OTLP exporters when FASTAPI_OTEL_AUTO_CONFIGURE=true (>= 0.143; always in
+# 0.142). Keep it off: our OTel setup is explicit.
+api = FastAPI(
+    title=settings.api_name,
+    version=version("open-wearables"),
+    lifespan=_lifespan,
+    telemetry={"auto_configure": False, "tracing": False, "metrics": False, "logs": False},
+)
 init_sentry()
+celery_app = create_celery()
 raw_payload_storage.configure(
     settings.raw_payload_storage,
     settings.raw_payload_max_size_bytes,
@@ -60,6 +105,7 @@ raw_payload_storage.configure(
 
 add_cors_middleware(api)
 add_access_log_middleware(api)
+add_endpoint_usage_middleware(api)
 # Last added is outermost: every request, refused or not, leaves an audit row (T-CYK-1009 AC-1).
 api.add_middleware(AccessAuditMiddleware)
 
@@ -74,21 +120,124 @@ async def root() -> dict[str, str]:
     return {"message": "Server is running!"}
 
 
+def _record_cause(request: Request, cause: BaseException) -> None:
+    request.state.error_cause_type = type(cause).__name__
+    try:
+        request.state.error_cause_msg = str(cause)[:300]
+    except Exception:
+        request.state.error_cause_msg = "<unavailable>"
+
+
+def _problem(
+    request: Request,
+    status_code: int,
+    detail: str,
+    code: str,
+    headers: Mapping[str, str] | None = None,
+    errors: list[ValidationErrorItem] | None = None,
+    extensions: Mapping[str, Any] | None = None,
+) -> Response:
+    return problem_response(status_code, detail, code, headers, errors, extensions)
+
+
+def _is_login(route: object) -> bool:
+    """The login form: its validation errors are answered as a failed login, never a 422."""
+    return getattr(route, "endpoint", None) is login
+
+
+def _location(loc: Sequence[str | int]) -> str:
+    return ".".join(str(part) for part in loc)
+
+
 @api.exception_handler(RequestValidationError)
-async def request_validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+async def request_validation_exception_handler(request: Request, exc: RequestValidationError) -> Response:
     # (FastAPI ≥ 0.130 rejects empty required str form fields before the handler runs)
-    if request.url.path.endswith("/auth/login"):
-        return JSONResponse(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            content={"detail": "Incorrect email or password"},
-            headers={"WWW-Authenticate": "Bearer"},
+    if _is_login(request.scope.get("route")):
+        return _problem(
+            request,
+            status.HTTP_401_UNAUTHORIZED,
+            "Incorrect email or password",
+            status_code_name(status.HTTP_401_UNAUTHORIZED),
+            {"WWW-Authenticate": "Bearer"},
         )
-    raise handle_exception(exc, "")
+    # never `input` or `ctx`: they carry the submitted values, passwords included
+    errors = [ValidationErrorItem(loc=list(e["loc"]), msg=e["msg"], type=e["type"]) for e in exc.errors()]
+    first = errors[0]
+    detail = f"{_location(first.loc)}: {first.msg}"
+    if len(errors) > 1:
+        detail += f" (and {len(errors) - 1} more)"
+    response = _problem(request, status.HTTP_422_UNPROCESSABLE_CONTENT, detail, VALIDATION_ERROR, errors=errors)
+    # which field failed, never str(exc): it carries the submitted values
+    request.state.error_cause_type = type(exc).__name__
+    request.state.error_cause_msg = _location(first.loc)
+    return response
 
 
-@api.exception_handler(DatetimeParseError)
-async def datetime_parse_exception_handler(_: Request, exc: DatetimeParseError) -> None:
-    raise handle_exception(exc, "")
+@api.exception_handler(AppError)
+async def app_error_handler(request: Request, exc: AppError) -> Response:
+    # a failed provider or storage call and a missing setting have a status and detail the
+    # client should see; Sentry's own handler hook still reports the 5xx (a provider's answer
+    # about a user's state is dropped in before_send)
+    if not exc.is_client_error and not isinstance(exc, UpstreamError | ConfigurationError):
+        raise exc  # unhandled → the catch-all 500, the traceback in the access log and Sentry
+    _record_cause(request, exc)  # its type in the access log; the detail is the response body anyway
+    return _problem(request, exc.status_code, exc.detail, exc.code, exc.headers, extensions=exc.extensions)
+
+
+@api.exception_handler(IntegrityError)
+@api.exception_handler(PsycopgIntegrityError)
+async def integrity_error_handler(request: Request, exc: IntegrityError | PsycopgIntegrityError) -> Response:
+    # the request's DB session was already rolled back by its dependency
+    if (app_error := app_error_from_integrity_error(exc)) is None:
+        raise exc  # a violation the client didn't cause (NOT NULL, CHECK) is our bug: 500
+    response = await app_error_handler(request, app_error)
+    # which constraint fired, never str(exc): it carries the statement's parameters and the offending values
+    violation_type, constraint = describe_integrity_error(exc)
+    request.state.error_cause_type = violation_type
+    request.state.error_cause_msg = f"constraint {constraint}"
+    # The services check what a client can collide with first, so reaching here is a race or a missing check.
+    logger.warning(
+        "Constraint violation answered as a client error",
+        alert=True,
+        violation=violation_type,
+        constraint=constraint,
+        path=request.url.path,
+    )
+    return response
+
+
+@api.exception_handler(Exception)
+async def unhandled_exception_handler(_: Request, __: Exception) -> Response:
+    # Starlette runs this from ServerErrorMiddleware, which re-raises after sending the
+    # response, so the access log still records the traceback and Sentry captures it.
+    return problem_response(status.HTTP_500_INTERNAL_SERVER_ERROR, "Internal server error", INTERNAL_ERROR)
+
+
+@api.exception_handler(StarletteHTTPException)
+async def http_exception_handler_with_body_log(request: Request, exc: StarletteHTTPException) -> Response:
+    # request.state survives the middleware boundary, so the access log can read it.
+    # real cause behind an opaque HTTPException (e.g. FastAPI's body-parse 400): explicit
+    # `from e`, else the implicitly-chained exception unless suppressed via `from None`.
+    cause = exc.__cause__
+    if cause is None and not exc.__suppress_context__:
+        cause = exc.__context__
+    if cause is not None:
+        _record_cause(request, cause)
+    # FastAPI allows any JSON value as detail: serialize it rather than print a Python repr
+    detail = exc.detail if isinstance(exc.detail, str) else json.dumps(exc.detail, default=str)
+    return _problem(request, exc.status_code, detail, status_code_name(exc.status_code), exc.headers)
 
 
 api.include_router(head_router)
+mount_routers(api, settings.api_v1, API_KEY_REQUIRED)
+
+
+def _openapi() -> dict[str, Any]:
+    if not api.openapi_schema:
+        schema = FastAPI.openapi(api)
+        schema["paths"][api.url_path_for(login.__name__)]["post"]["responses"].pop("422", None)
+        api.openapi_schema = add_problem_responses(schema)
+    return api.openapi_schema
+
+
+api.openapi = _openapi  # ty: ignore[invalid-assignment]

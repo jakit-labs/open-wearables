@@ -1,27 +1,35 @@
 from __future__ import annotations
 
+import os
 import warnings
 from datetime import timedelta
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any, Literal
 from urllib.parse import quote
-
-if TYPE_CHECKING:
-    from app.schemas.enums import ProviderName
 
 from cryptography.fernet import Fernet
 from pydantic import AnyHttpUrl, Field, SecretStr, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.schemas.enums import ProviderName
 from app.schemas.enums.data_granularity import DataGranularity
 from app.utils.config_utils import (
     AccessLogLevel,
     EncryptedField,
     EnvironmentType,
     FernetDecryptorField,
+    LogFormat,
+    LogLevel,
+    derive_secret,
     parse_duration,
 )
+
+# Public in .env.example and the docs, so an account still using it is open to anyone.
+DEFAULT_ADMIN_PASSWORD = "your-secure-password"
+
+# SECRET_KEY signs every JWT (HS256); the old .env.example default is shorter, so it fails too
+MIN_SECRET_KEY_LENGTH = 32
 
 
 class TokenEncryptionKeyMissingError(RuntimeError):
@@ -33,6 +41,8 @@ class Settings(BaseSettings):
         env_file=str(Path(__file__).parent.parent / "config" / ".env"),
         env_file_encoding="utf-8",
         extra="ignore",
+        # A rejected SECRET_KEY must not end up in the container logs
+        hide_input_in_errors=True,
         # default env_file solution search .env every time BaseSettings is instantiated
         # dotenv search .env when module is imported, without usecwd it starts from the file it was called
     )
@@ -53,6 +63,20 @@ class Settings(BaseSettings):
     # None → derived in derive_access_log_level (prod: errors only, else: all)
     access_log_level: AccessLogLevel | None = None
 
+    # LOGGING SETTINGS
+    # legacy: JSON from the app logger, plain text from other loggers (the output before
+    # LOG_FORMAT existed). json: every line JSON. text: every line human-readable.
+    log_format: LogFormat = LogFormat.LEGACY
+    # None keeps the per-logger defaults (INFO for the app and the root logger).
+    log_level: LogLevel | None = None
+    # Export logs over OTLP/HTTP as well (needs the `otel` extra). Endpoint, headers and
+    # resource come from the standard OTEL_* variables; OTEL_SDK_DISABLED=true also turns it off.
+    # BH.Loop fork (T-CYK-1009 AC-5): refused, see _refuse_otel_export.
+    otel_enabled: bool = False
+    # Comma-separated attribute names, added to the built-in list, whose values are
+    # replaced with "REDACTED" in exported logs. Matching ignores case.
+    otel_export_redact_keys: str = ""
+
     # DATABASE SETTINGS
     db_host: str = "db"
     db_port: int = 5432
@@ -66,10 +90,14 @@ class Settings(BaseSettings):
     SENTRY_SAMPLES_RATE: float = 0.5
     SENTRY_ENV: str | None = None
     SENTRY_SERVER_NAME: str | None = None
+    # Sends request bodies, stack-frame locals, log breadcrumbs and unfiltered error text to
+    # Sentry. These carry health data and PII - only for dev/staging or a Sentry you may store PHI in.
+    SENTRY_SEND_SENSITIVE_DATA: bool = False
     GIT_SHA: str | None = None
 
     # AUTH SETTINGS
-    secret_key: str
+    # Empty by default so a missing key gets the length check's message instead of "Field required"
+    secret_key: str = ""
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 60
     token_lifetime: int = 3600
@@ -91,7 +119,7 @@ class Settings(BaseSettings):
 
     # ADMIN ACCOUNT SEED
     admin_email: str = "admin@admin.com"
-    admin_password: SecretStr = SecretStr("your-secure-password")
+    admin_password: SecretStr = SecretStr(DEFAULT_ADMIN_PASSWORD)
     # T-CYK-1009 S20: the API key BH.Loop's API sends, minted into Secret Manager by the
     # operator. The migrate step stores its hash (scripts/init/seed_api_key.py). Unset, none.
     seed_api_key: SecretStr | None = None
@@ -101,10 +129,15 @@ class Settings(BaseSettings):
 
     # Time between sleep phases to conclude end of sleep session
     sleep_end_gap_minutes: int = 120  # 2 hours
+    # Time without uploads to conclude end of Apple Watch sleep session
+    sleep_upload_quiet_minutes: int = 15
+
+    # Share of a sleep or workout a better-ranked source's sessions must cover for per-session selection to drop it
+    session_duplicate_overlap: float = Field(default=0.5, gt=0, le=1)
 
     # SYNC SETTINGS
     sync_interval_seconds: int = 3600  # Default: 1 hour (3600 seconds)
-    sleep_sync_interval_seconds: int = 3600  # Default: 1 hour (3600 seconds)
+    sleep_sync_interval_seconds: int = 300  # Default: 5 minutes (300 seconds)
     # Re-fetch a trailing window on each *live* pull sync so late provider revisions
     # (e.g. Oura finalising a day's step count after we already moved past it) are
     # picked up. Disabled by default. Set via a compact duration string: "2d", "20h",
@@ -123,7 +156,8 @@ class Settings(BaseSettings):
     linked_sync_pull_lease_seconds: int = Field(120, ge=30, le=3600)
 
     # Whether to ingest per-second workout samples (speed, cadence, power, GPS, etc.) into
-    # data_point_series on workout webhook arrival. Significantly increases DB storage.
+    # series_sample on workout webhook arrival, and the route/samples of mobile SDK workouts.
+    # Significantly increases DB storage.
     # Per-provider granularity will be added via ProviderSetting in a future release.
     ingest_workout_samples: bool = False
 
@@ -139,6 +173,9 @@ class Settings(BaseSettings):
     default_data_granularity: DataGranularity = DataGranularity.RAW
 
     # SCORE SETTINGS
+    # Compute OW's own (provider="internal") sleep and resilience scores. Device-reported scores
+    # from providers are stored regardless. The fill tasks are idempotent, so re-enabling backfills the gap.
+    ow_scores_enabled: bool = True
     score_backfill_days: int = 30  # How far back the missing-score query looks
     sleep_score_interval_seconds: int = 600  # How often to run the fill-missing-scores task (default: 10 min)
     resilience_score_interval_seconds: int = (
@@ -154,6 +191,9 @@ class Settings(BaseSettings):
     # not the whole run: the sweep leaves anything still reporting in Redis alone.
     sync_run_stale_after_hours: int = Field(2, ge=1)
     sync_run_sweep_interval_seconds: int = Field(1800, ge=60)
+    # A user's sync.completed events within this window reach extensions as one task.
+    extension_event_debounce_seconds: int = Field(300, ge=0)
+    extension_event_sweep_interval_seconds: int = Field(60, ge=10)
 
     # API SETTINGS
     api_base_url: str = "http://localhost:8000"
@@ -214,6 +254,9 @@ class Settings(BaseSettings):
     strava_webhook_signature_tolerance_seconds: int = Field(300, ge=0)
     # Strava API max is 200 activities per page
     strava_events_per_page: int = 200
+    # Delayed stream re-fetch when the webhook beats stream processing; delay triples per attempt.
+    strava_stream_retry_max_attempts: int = Field(3, ge=0)
+    strava_stream_retry_base_delay_seconds: int = Field(300, gt=0)
 
     # ULTRAHUMAN OAUTH SETTINGS
     ultrahuman_client_id: str | None = None
@@ -252,8 +295,13 @@ class Settings(BaseSettings):
     withings_webhook_token: SecretStr | None = None
     withings_default_scope: str = "user.info,user.metrics,user.activity"
 
-    # EMAIL SETTINGS (Resend)
+    # EMAIL SETTINGS (SMTP is used when SMTP_HOST is set, otherwise Resend)
     resend_api_key: SecretStr | None = None
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_username: str | None = None
+    smtp_password: SecretStr | None = None
+    smtp_security: Literal["starttls", "ssl", "none"] = "starttls"
     email_from_address: str | None = None
     email_from_name: str = "Open Wearables"
     frontend_url: str = "http://localhost:3000"
@@ -291,6 +339,26 @@ class Settings(BaseSettings):
 
     xml_chunk_size: int = 50_000
 
+    # DATA LIFECYCLE
+    # Master switch for time-series archival and retention: the admin panel tab, the
+    # /settings/archival endpoints and the daily archival task.
+    data_lifecycle_enabled: bool = True
+
+    # RECONCILE (merged days, stored by the 15-minute rollup)
+    # Whether the rollup also stores a user's sources' movement series merged per day (source_selection=reconcile).
+    # Off, reconcile reads merge every day on the fly, up to reconcile_on_the_fly_max_days a page.
+    reconcile_enabled: bool = False
+    # How far back from today the rollup stores merged days; older days are merged when a read asks for them.
+    reconcile_stored_days: int = Field(default=30, ge=0)
+    # The most days one page of a reconcile read merges on the fly; pages are shortened to it, and only a period
+    # needing more on its own is refused (400). 31 fits a month.
+    reconcile_on_the_fly_max_days: int = Field(default=31, ge=1, le=90)
+    # Seconds a rollup run spends merging, after and on top of its own budget; kept under the task's soft limit.
+    reconcile_seconds_per_run: int = Field(default=30, ge=0, le=50)
+    # Seconds past each edge of a better-ranked device's sample that still count as covered by it, so two apps
+    # reading one sensor in windows a few seconds apart merge as one stream instead of leaking duplicate steps.
+    reconcile_edge_tolerance_seconds: int = Field(default=60, ge=0, le=300)
+
     # RAW PAYLOAD STORAGE
     # BH.Loop fork (T-CYK-1009): no stdout mode; it printed whole payloads past the log allowlist
     raw_payload_storage: Literal["disabled", "s3"] = "disabled"
@@ -313,6 +381,30 @@ class Settings(BaseSettings):
     svix_jwt_secret: SecretStr | None = None
     # Bearer token for the Svix API.  If unset, auto-generated from svix_jwt_secret at startup.
     svix_auth_token: SecretStr | None = None
+    # How long Svix keeps each message payload (health data). Svix accepts 5-90 days.
+    # Must outlast the retry schedule (~28h, up to ~66h with Retry-After): Svix silently
+    # drops a retry once the payload is gone.
+    outgoing_webhook_payload_retention_days: int = Field(7, ge=5, le=90)
+
+    # TELEMETRY SETTINGS
+    # Anonymous usage telemetry: aggregate counts and config flags only, never
+    # user data - see docs/dev-guides/telemetry.mdx for the full payload.
+    # BH.Loop fork (T-CYK-1009): off by default; the sidecar sends nothing to the
+    # telemetry endpoint unless TELEMETRY_ENABLED=true is set on purpose.
+    telemetry_enabled: bool = False  # also off with DO_NOT_TRACK=1
+    telemetry_endpoint_url: str = "https://telemetry.openwearables.io/api/v1/pings"
+    telemetry_beat_interval_seconds: float = 3600.0  # how often to check if a ping is due
+    telemetry_send_interval_seconds: float = 86400.0  # min gap between "daily" pings
+    telemetry_startup_debounce_seconds: float = 43200.0  # min gap before a "startup" ping
+    telemetry_usage_flush_interval_seconds: float = 30.0  # endpoint counters -> Redis
+
+    @model_validator(mode="after")
+    def honor_do_not_track(self) -> "Settings":
+        # https://donottrack.sh - the cross-tool convention, read from the environment
+        # only so it never ends up as a settings field of its own.
+        if os.environ.get("DO_NOT_TRACK", "").strip().lower() in {"1", "true", "yes", "on"}:
+            self.telemetry_enabled = False
+        return self
 
     @model_validator(mode="after")
     def derive_access_log_level(self) -> "Settings":
@@ -346,8 +438,9 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def derive_strava_webhook_verify_token(self) -> "Settings":
+        # Strava receives this token, so it must not be SECRET_KEY itself
         if self.strava_webhook_verify_token is None or self.strava_webhook_verify_token.get_secret_value() == "":
-            self.strava_webhook_verify_token = SecretStr(self.secret_key)
+            self.strava_webhook_verify_token = SecretStr(derive_secret(self.secret_key, "strava-webhook-verify-token"))
         return self
 
     @model_validator(mode="after")
@@ -365,6 +458,25 @@ class Settings(BaseSettings):
             self.google_webhook_secret = SecretStr(self.secret_key)
         return self
 
+    @field_validator("otel_enabled", mode="after")
+    @classmethod
+    def _refuse_otel_export(cls, enabled: bool) -> bool:
+        # BH.Loop fork (T-CYK-1009 AC-5): the exporter ships record attributes past the log
+        # allowlist, so every process (API, worker, beat, migrate) refuses to start with it.
+        if enabled:
+            raise ValueError("OTEL_ENABLED is refused in this fork: log export would bypass the log allowlist")
+        return enabled
+
+    @field_validator("secret_key", mode="after")
+    @classmethod
+    def reject_short_secret_key(cls, v: str) -> str:
+        if len(v) < MIN_SECRET_KEY_LENGTH:
+            problem = "is not set" if not v else f"must be at least {MIN_SECRET_KEY_LENGTH} characters"
+            raise ValueError(
+                f"SECRET_KEY {problem}. Run `make init` to generate one, or set it with `openssl rand -hex 32`."
+            )
+        return v
+
     @field_validator("cors_origins", mode="after")
     @classmethod
     def assemble_cors_origins(cls, v: str | list[str]) -> list[str] | str:
@@ -375,6 +487,33 @@ class Settings(BaseSettings):
 
         # This should never be reached given the type annotation, but ensures type safety
         raise ValueError(f"Unexpected type for cors_origins: {type(v)}")
+
+    @field_validator("log_format", mode="before")
+    @classmethod
+    def _parse_log_format(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            return v.strip().lower() or LogFormat.LEGACY
+        return v
+
+    @field_validator("log_level", mode="before")
+    @classmethod
+    def _parse_log_level(cls, v: Any) -> Any:
+        if not isinstance(v, str):
+            return v
+        name = v.strip().upper()
+        # Aliases the logging module accepts, common in shared LOG_LEVEL variables.
+        name = {"WARN": "WARNING", "FATAL": "CRITICAL"}.get(name, name)
+        if not name:
+            return None
+        if name not in LogLevel.__members__:
+            # LOG_LEVEL is a common variable name; a value meant for another tool (TRACE,
+            # NOTSET, ...) must not stop the backend from starting.
+            warnings.warn(
+                f"Ignoring LOG_LEVEL={v!r}: expected DEBUG, INFO, WARNING, ERROR or CRITICAL",
+                stacklevel=2,
+            )
+            return None
+        return name
 
     @field_validator("pull_sync_lookback", mode="before")
     @classmethod
@@ -408,9 +547,7 @@ class Settings(BaseSettings):
         Google Health was reachable at /google/ before it was split from Health Connect,
         and that path is in every pre-0.8.1 deployment's registered redirect URI.
         """
-        from app.schemas.enums import ProviderName as _ProviderName  # runtime-only; see TYPE_CHECKING above
-
-        if provider is _ProviderName.GOOGLE_HEALTH and self.google_legacy_oauth_path:
+        if provider is ProviderName.GOOGLE_HEALTH and self.google_legacy_oauth_path:
             return "google"
         return provider.value
 
@@ -471,6 +608,9 @@ class Settings(BaseSettings):
 
 @lru_cache()
 def _get_settings() -> Settings:
+    # Tests set this so a developer's local config/.env can't change test behaviour
+    if os.environ.get("OW_IGNORE_ENV_FILE"):
+        return Settings(_env_file=None)
     return Settings()
 
 

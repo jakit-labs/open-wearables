@@ -1,14 +1,12 @@
 """Handle Withings OAuth token RPC envelopes and provider user identity."""
 
-import logging
 from uuid import UUID
 
 import httpx
 from celery import current_app as celery_app
-from fastapi import HTTPException
-from starlette.status import HTTP_500_INTERNAL_SERVER_ERROR
 
 from app.config import settings
+from app.constants.celery_tasks import CeleryQueue, CeleryTask
 from app.database import DbSession, SessionLocal
 from app.repositories.provider_settings_repository import ProviderSettingsRepository
 from app.schemas.auth import AuthenticationMethod, LiveSyncMode
@@ -20,46 +18,12 @@ from app.schemas.model_crud.credentials import (
     ProviderEndpoints,
 )
 from app.services.providers.templates.base_oauth import BaseOAuthTemplate
-from app.services.providers.withings.handlers.tasks import REGISTER_USER_WEBHOOKS_TASK
-from app.utils.structured_logging import log_structured
+from app.services.providers.withings.handlers.errors import withings_token_error
+from app.services.providers.withings.webhook_service import WithingsWebhookService
+from app.utils.exceptions import ProviderAuthRejectedError, ProviderError, ReauthRequiredError
+from app.utils.structured_logging import get_logger
 
-logger = logging.getLogger(__name__)
-
-# Token-request statuses caused by invalid request inputs rather than provider faults.
-_TOKEN_CLIENT_ERROR_STATUSES = {247, 250, 283, 286, 293, 303, 304, 342}
-# Withings' "Authentication failed" family. On refresh these also mean the grant
-# is spent; on exchange they usually mean an expired authorization code.
-_AUTHENTICATION_FAILED_STATUSES = {100, 101, 102, 200, 401}
-_RATE_LIMIT_STATUS = 601
-
-
-class WithingsTokenError(HTTPException):
-    """Typed token failure preserving provider status and grant finality."""
-
-    def __init__(
-        self,
-        *,
-        task: str,
-        withings_status: int | None = None,
-        http_status: int | None = None,
-        detail: str | None = None,
-    ) -> None:
-        self.withings_status = withings_status
-        self.http_status = http_status
-        authentication_failed = withings_status in _AUTHENTICATION_FAILED_STATUSES or http_status in {400, 401}
-        self.invalid_grant = task == "refresh_access_token" and authentication_failed
-        if withings_status == _RATE_LIMIT_STATUS or http_status == 429:
-            status_code = 429
-        elif authentication_failed:
-            status_code = 401
-        elif withings_status in _TOKEN_CLIENT_ERROR_STATUSES or (http_status is not None and http_status < 500):
-            status_code = 400
-        else:
-            status_code = 500
-        super().__init__(
-            status_code=status_code,
-            detail=detail or f"Withings token error (status={withings_status})",
-        )
+logger = get_logger(__name__)
 
 
 class WithingsOAuth(BaseOAuthTemplate):
@@ -97,7 +61,9 @@ class WithingsOAuth(BaseOAuthTemplate):
         }
         return self._request_token(payload, task="exchange_token")
 
-    def refresh_access_token(self, db: DbSession, user_id: UUID, refresh_token: str) -> OAuthTokenResponse:
+    def refresh_access_token(
+        self, db: DbSession, user_id: UUID, refresh_token: str, *, revoke_on_failure: bool = True
+    ) -> OAuthTokenResponse:
         payload = {
             "action": "requesttoken",
             "grant_type": "refresh_token",
@@ -107,10 +73,11 @@ class WithingsOAuth(BaseOAuthTemplate):
         }
         try:
             token_response = self._request_token(payload, task="refresh_access_token")
-        except WithingsTokenError as exc:
-            if exc.invalid_grant:
-                self._revoke_connection(db, user_id, reason="refresh_failed")
-            raise
+        except ProviderAuthRejectedError as e:
+            if not revoke_on_failure:
+                raise
+            self.revoke_connection(db, user_id, reason="refresh_failed")
+            raise ReauthRequiredError(self.provider_name, user_id, "Refresh token rejected") from e
 
         connection = self.connection_repo.get_by_user_and_provider(db, user_id, self.provider_name)
         if connection:
@@ -122,9 +89,7 @@ class WithingsOAuth(BaseOAuthTemplate):
                 token_response.refresh_token or refresh_token,
                 token_response.expires_in,
             )
-        log_structured(
-            logger,
-            "info",
+        logger.info(
             "Withings token refreshed",
             provider=self.provider_name,
             task="refresh_access_token",
@@ -144,43 +109,36 @@ class WithingsOAuth(BaseOAuthTemplate):
             response.raise_for_status()
             envelope = response.json()
         except httpx.HTTPStatusError as e:
-            log_structured(
-                logger,
-                "error",
-                f"Withings token HTTP error: {e.response.text}",
+            logger.error(
+                "Token HTTP error",
                 provider=self.provider_name,
                 task=task,
                 status_code=e.response.status_code,
+                response_body=e.response.text,
             )
-            raise WithingsTokenError(
+            raise withings_token_error(
                 task=task,
                 http_status=e.response.status_code,
-                detail=f"Withings token request failed: {e.response.text}",
+                upstream_body=e.response.text,
             ) from e
-        except Exception as e:
-            log_structured(
-                logger,
-                "error",
-                f"Withings token request failed: {e}",
+        except (httpx.RequestError, ValueError) as e:
+            logger.error(
+                "Token request failed",
                 provider=self.provider_name,
                 task=task,
+                error=str(e),
             )
-            raise HTTPException(
-                status_code=HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Withings token request failed: {e}",
-            ) from e
+            raise ProviderError(self.provider_name, "Withings token request failed") from e
 
         status = envelope.get("status")
         if status != 0:
-            log_structured(
-                logger,
-                "error",
+            logger.error(
                 "Withings token envelope status non-zero",
                 provider=self.provider_name,
                 task=task,
                 withings_status=status,
             )
-            raise WithingsTokenError(task=task, withings_status=status)
+            raise withings_token_error(task=task, withings_status=status)
 
         return OAuthTokenResponse.model_validate(envelope.get("body", {}))
 
@@ -210,15 +168,13 @@ class WithingsOAuth(BaseOAuthTemplate):
             return
         try:
             celery_app.send_task(
-                REGISTER_USER_WEBHOOKS_TASK,
-                args=[self.provider_name, str(user_id)],
-                queue="webhook_sync",
+                CeleryTask.WITHINGS_SYNC_USER_SUBSCRIPTIONS,
+                args=[str(user_id)],
+                queue=CeleryQueue.WEBHOOK_SYNC,
             )
         except Exception as e:
             # The account is linked either way; a broker failure must not fail the callback.
-            log_structured(
-                logger,
-                "error",
+            logger.error(
                 "Withings notify subscription scheduling failed",
                 provider=self.provider_name,
                 user_id=str(user_id),
@@ -241,9 +197,6 @@ class WithingsOAuth(BaseOAuthTemplate):
             linked = self.connection_repo.get_all_by_provider_user_id(db, self.provider_name, provider_user_id)
             if len(linked) != 1:
                 return
-            # Imported here: webhook_service imports WithingsTokenError from this module.
-            from app.services.providers.withings.webhook_service import WithingsWebhookService
-
             service = WithingsWebhookService(connection_repo=self.connection_repo, oauth=self)
             # Reconciling toward PULL means "no subscriptions desired", which
             # prunes exactly the set this account owns.

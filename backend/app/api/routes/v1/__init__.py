@@ -18,12 +18,12 @@ from .meta import router as meta_router
 from .oauth import router as oauth_router
 from .oura_webhooks import router as oura_webhooks_router
 from .outgoing_webhooks import router as outgoing_webhooks_router
+from .personal_record import router as personal_record_router
 from .priorities import router as priorities_router
 from .sdk_logs import router as sdk_logs_router
 from .sdk_sync import router as sdk_sync_router
 from .sdk_token import router as sdk_token_router
 from .seed_data import router as seed_data_router
-from .strava_webhooks import router as strava_webhooks_router
 from .summaries import router as summaries_router
 from .sync_data import router as sync_data_router
 from .sync_status import router as sync_status_router
@@ -39,6 +39,7 @@ v1_router = APIRouter()
 # --- External: 3rd party integration endpoints ---
 v1_router.include_router(meta_router, tags=["External: Meta"])
 v1_router.include_router(users_router, tags=["External: Users"])
+v1_router.include_router(personal_record_router, tags=["External: Users"])
 v1_router.include_router(connections_router, tags=["External: Connections"])
 v1_router.include_router(summaries_router, tags=["External: Summaries"])
 v1_router.include_router(timeseries_router, tags=["External: Timeseries"])
@@ -71,7 +72,6 @@ v1_router.include_router(priorities_router, tags=["Internal: Priorities"])
 
 # --- System: provider webhooks ---
 v1_router.include_router(oura_webhooks_router, prefix="/oura/webhooks", tags=["System: Oura Webhooks"])
-v1_router.include_router(strava_webhooks_router, prefix="/strava/webhooks", tags=["System: Strava Webhooks"])
 v1_router.include_router(
     providers_webhooks_router, prefix="/providers/{provider}/webhooks", tags=["System: Provider Webhooks"]
 )

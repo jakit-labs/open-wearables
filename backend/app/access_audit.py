@@ -14,7 +14,6 @@ app runs. A row that cannot be written stops the request with 503: no access goe
 unrecorded.
 """
 
-import logging
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -27,9 +26,9 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.database import engine
 from app.models import AccessAudit
-from app.utils.structured_logging import log_structured
+from app.utils.structured_logging import get_logger
 
-logger = logging.getLogger("app.access_audit")
+logger = get_logger("app.access_audit")
 
 # Bumped with every change to what a row records or how the context is checked.
 POLICY_VERSION = "bh-loop-access-audit/1"
@@ -143,7 +142,7 @@ async def _write(row: dict[str, Any], outcome: str, status: int | None) -> bool:
     try:
         await run_in_threadpool(_insert, {**row, "id": uuid4(), "outcome": outcome, "status": status})
     except Exception as exc:
-        log_structured(logger, "error", "access_audit_write_failed", error_type=type(exc).__name__)
+        logger.error("access_audit_write_failed", error_type=type(exc).__name__)
         return False
     return True
 

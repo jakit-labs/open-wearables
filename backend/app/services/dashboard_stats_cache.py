@@ -1,6 +1,6 @@
 """Redis-backed cache for the expensive dashboard total-data-points count.
 
-A full ``COUNT(*)`` over ``data_point_series`` is a multi-second sequential scan, so the exact
+A full ``COUNT(*)`` over ``series_sample`` is a multi-second sequential scan, so the exact
 figure is cached and served stale-while-revalidate:
 
 * fresh cache hit -> return the exact cached value;
@@ -11,16 +11,18 @@ The exact recount runs in a Celery task (see ``refresh_dashboard_stats_task``), 
 pays for the scan. A short-lived lock ensures only one refresh is in flight at a time.
 """
 
-from logging import getLogger
 from uuid import uuid4
 
 import redis
+from celery import current_app as celery_app
 
+from app.constants.celery_tasks import CeleryTask
 from app.database import DbSession
 from app.integrations.redis_client import get_redis_client
 from app.services.timeseries_service import timeseries_service
+from app.utils.structured_logging import get_logger
 
-logger = getLogger(__name__)
+logger = get_logger(__name__)
 
 _CACHE_KEY = "dashboard:total_data_points"
 _FRESH_KEY = "dashboard:total_data_points:fresh"
@@ -49,8 +51,8 @@ def get_total_data_points(db_session: DbSession) -> int:
             return int(cached)
         # Cold cache: approximate now, exact recount happens in the background.
         _trigger_refresh(client)
-    except Exception:
-        logger.warning("Dashboard total-data-points cache unavailable; using approximate count", exc_info=True)
+    except Exception as e:
+        logger.warning("Dashboard total-data-points cache unavailable; using approximate count", exc_info=e)
 
     return timeseries_service.get_approximate_total_count(db_session)
 
@@ -60,16 +62,13 @@ def _trigger_refresh(client: redis.Redis) -> None:
     token = uuid4().hex
     if not client.set(_LOCK_KEY, token, nx=True, ex=_LOCK_TTL_SECONDS):
         return
-    # Imported lazily to avoid a circular import (task -> this module -> task).
-    from app.integrations.celery.tasks.refresh_dashboard_stats_task import refresh_dashboard_total_data_points
-
     # retry=False: never let broker connection retries block the dashboard request. The task
     # releases the lock (matching this token) when it finishes.
     try:
-        refresh_dashboard_total_data_points.apply_async(args=[token], retry=False)
-    except Exception:
+        celery_app.send_task(CeleryTask.REFRESH_DASHBOARD_TOTAL_DATA_POINTS, args=[token], retry=False)
+    except Exception as e:
         # Dispatch failed (e.g. broker down): free our lock so a later request can retry.
-        logger.warning("Failed to dispatch dashboard stats refresh", exc_info=True)
+        logger.warning("Failed to dispatch dashboard stats refresh", exc_info=e)
         release_refresh_lock(token)
 
 

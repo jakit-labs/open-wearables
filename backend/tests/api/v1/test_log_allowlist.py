@@ -16,19 +16,19 @@ from uuid import uuid4
 
 import httpx
 import pytest
-from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.config import Settings
-from app.database import DbSession, _get_db_dependency, async_engine, engine
+from app.database import DbSession, _get_db_dependency, engine
 from app.integrations.celery.tasks.process_sdk_upload_task import process_sdk_upload
 from app.main import api, celery_app
 from app.models import User
 from app.services import raw_payload_storage
 from app.services.providers.factory import ProviderFactory
+from app.utils.exceptions import ReauthRequiredError
 
 SENTINEL = "173.917"  # a synthetic heart-rate-like value; never real data
 STORED_SENTINEL = "173.92"  # the same value as a numeric(5,2) column keeps it
@@ -82,7 +82,7 @@ class TestNoRequestValueReachesTheLogs:
     ) -> None:
         response = client.post("/api/v1/users", json={"email": f"{SENTINEL}@"}, headers=api_key_header)
 
-        assert response.status_code == 400
+        assert response.status_code == 422  # upstream #1976: RFC 9457 validation_error
         _assert_no_sentinel(log_output())
 
     def test_500_database_error(self, server_error_client: TestClient, log_output: Callable[[], str]) -> None:
@@ -137,7 +137,7 @@ class TestNoRequestValueReachesTheLogs:
             request=httpx.Request("POST", token_url),
         )
 
-        with patch("httpx.post", return_value=rejection), pytest.raises(HTTPException):
+        with patch("httpx.post", return_value=rejection), pytest.raises(ReauthRequiredError):
             oauth.refresh_access_token(db, user.id, f"tok-{SENTINEL}")
 
         _assert_no_sentinel(log_output())
@@ -205,8 +205,8 @@ class TestNoRequestValueReachesTheLogs:
 
 def test_statement_errors_hide_their_parameters() -> None:
     # A statement error's text then never carries a bound value into any sink.
+    # (Upstream removed the async engine; the sync engine is the only one.)
     assert engine.hide_parameters is True
-    assert async_engine.sync_engine.hide_parameters is True
 
 
 class TestRawPayloadStorageHasNoStdoutMode:
